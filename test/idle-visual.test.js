@@ -33,12 +33,27 @@ describe("listIdleVisualOptions", () => {
       template: ["idle-follow.svg", "idle-look.gif"],
     };
     const themesDir = path.join(__dirname, "..", "themes");
-    assert.deepStrictEqual(fs.readdirSync(themesDir).filter((id) =>
-      fs.existsSync(path.join(themesDir, id, "theme.json"))).sort(), Object.keys(expected).sort());
+    const bundled = fs.readdirSync(themesDir).filter((id) =>
+      fs.existsSync(path.join(themesDir, id, "theme.json"))).sort();
+    for (const id of Object.keys(expected)) {
+      assert.ok(bundled.includes(id), `missing shipped theme: ${id}`);
+    }
     for (const [id, files] of Object.entries(expected)) {
       const theme = JSON.parse(fs.readFileSync(path.join(themesDir, id, "theme.json"), "utf8"));
       assert.strictEqual(Object.hasOwn(theme, "idleVisualOptions"), false, id);
       assert.deepStrictEqual(listIdleVisualOptions(theme).map((entry) => entry.file), files, id);
+    }
+    for (const id of bundled.filter((entry) => !(entry in expected))) {
+      const theme = JSON.parse(fs.readFileSync(path.join(themesDir, id, "theme.json"), "utf8"));
+      assert.strictEqual(Object.hasOwn(theme, "idleVisualOptions"), false, id);
+      const options = listIdleVisualOptions(theme);
+      assert.ok(options.length > 0, `${id} must expose at least one idle visual`);
+      assert.ok(options.some((entry) => entry.isThemeDefault), `${id} must expose its theme default`);
+      assert.strictEqual(
+        new Set(options.map((entry) => entry.file)).size,
+        options.length,
+        `${id} idle options must be unique`,
+      );
     }
   });
 
