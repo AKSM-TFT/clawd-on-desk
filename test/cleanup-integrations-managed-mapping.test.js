@@ -65,9 +65,12 @@ describe("#1026 r1 cleanupIntegrations structured-result mapping", () => {
     assert.strictEqual(agent.registrationRemoved, true);
     assert.strictEqual(agent.activeEntryRemaining, false);
     assert.notStrictEqual(agent.status, "failed");
-    assert.deepStrictEqual(
-      JSON.parse(fs.readFileSync(path.join(home, ".config", "opencode", "opencode.json"), "utf8")).plugin,
-      []
+    assert.strictEqual(
+      Object.hasOwn(
+        JSON.parse(fs.readFileSync(path.join(home, ".config", "opencode", "opencode.json"), "utf8")),
+        "plugins"
+      ),
+      false
     );
   });
 });

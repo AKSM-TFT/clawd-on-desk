@@ -9,13 +9,50 @@ issue #1039。测试环境：macOS arm64，`opencode v2.0.15`（brew `anomalyco/
 
 | # | 问题 | 结论 |
 |---|------|------|
-| 1 | v2 读哪个 plugin 配置键 | **`plugins`（新）生效**；同时容忍并尝试加载旧 `plugin` 键条目 |
-| 2 | v1 是否容忍配置里出现 `plugins` 键 | **容忍**：1.18.32 `debug config` 静默丢弃该键，config 解析正常 ⇒ 双键并存注册安全 |
-| 3 | v1 函数入口在 v2 下的命运 | server log WARN：`Plugin must export a default definition with an id and an effect or setup function (Expected object at ["default"])`，宿主不崩、插件 inert ⇒ #1039 根因 |
+| 1 | v2 读哪个 plugin 配置键 | **`plugins`（新）生效**；2.0.15 还会容忍并尝试加载旧 `plugin` 键条目 —— ⚠️ 该容忍在 2.0.27 已失效，见下方「结论 1 / 3 的后续更正」 |
+| 2 | v1 是否容忍配置里出现 `plugins` 键 | **容忍**：1.18.32 `debug config` 静默丢弃该键，config 解析正常 ⇒ 双键并存注册安全（仅 v1 侧结论；v2 侧见第 1 行更正） |
+| 3 | v1 函数入口在 v2 下的命运 | server log WARN：`Plugin must export a default definition with an id and an effect or setup function (Expected object at ["default"])`，宿主不崩、插件 inert ⇒ #1039 根因。⚠️ 2.0.27 起不再只是 WARN，见下方更正 |
 | 4 | v2 entry 形态 | `{id, setup}` 纯对象、零 import、目录 specifier（解析到目录下 `index.mjs`，无需 package.json）全部可用 |
 | 5 | evaluate hook 可否异步阻塞等外部决定 | **可以**：hook 内 `await 2s` 期间宿主真实等待，改 `event.effect="allow"` 后工具才执行 |
 | 6 | 插件进程模型 | 插件在常驻 service 内（`ppid=1`，CLI 退出后事件流仍活）；`source_pid`/进程树不可信 |
 | 7 | `plugin list` | 显示插件 `id`（合法）或 `-`（加载失败）；source 为目录解析后的 `index.mjs` 路径 |
+
+## 结论 1 / 3 的后续更正：opencode 2.0.27 不再容忍双键并存（2026-10-13）
+
+上文「双键并存注册安全」只在 **2.0.15** 成立。**2.0.27** 上，只要配置里存在 `plugins` 键，
+宿主就会把 legacy `plugin` 键的条目也按 **v2 plugin schema** 校验，v1 函数入口硬失败。
+
+Windows x64，npm 全局 `@opencode/cli@2.0.27`（`opencode v2.0.27`），实测证据：
+
+```
+opencode.log（server run=6d95aafd, version=2.0.27）
+T20:03:50.766Z msg="loading plugin" id=…/generations/016f3677…/opencode-plugin
+                     entrypoint=file:///…/generations/016f3677…/opencode-plugin/index.mjs
+T20:03:50.768Z level=WARN message="failed to load plugin" target=…/generations/016f3677…/opencode-plugin
+  cause="PluginModule.LoadError: Plugin must export a default definition with an id and an
+         effect or setup function. (cause: SchemaError(Expected object at ["default"])))"
+```
+
+触发条件是**两个键同时存在**，而不是宿主版本本身：
+
+- 同一 server run 在 `19:18:11Z` 之前一直正常加载 legacy `plugin` 条目
+  （`~/.clawd/opencode-plugin.log` 有活跃 state POST）。
+- Clawd 集成同步在 `19:30:22.309Z` 写入 `plugins` 键（`owner.json updatedAt`），
+  `19:30:24.477Z` 第一次失败 —— 同一 server run、同一宿主二进制。
+- 仅含 legacy `plugin` 键的配置在 2.0.27 上加载正常，`opencode plugin list` 里
+  v2 条目显示 `clawd-on-desk-opencode`，legacy 条目显示 `-`（从未注册成功）。
+
+用户可见症状是 TUI 每次启动的 `Plugin failed: <generation>/opencode-plugin`；
+宿主本身不崩，v2 条目照常工作，所以只是噪音 + 一条永远无法注册的残留条目。
+
+**因此安装器契约改为**：v2 宿主上只注册 `plugins` 键，并 sweep proven-owned 的
+legacy `plugin` 条目；探测失败（unknown）时仍写 legacy 键 —— 仅含 legacy 键的配置
+对 v1 / v2 宿主都安全。因为 v2 宿主上不再写 legacy 键，`plugins` registrar 顺带接管
+「配置目录存在但文件缺失」时的默认配置文件创建（`freshV2ConfigText`）。
+
+**未验证**：2.0.16–2.0.26 之间的具体版本何时改变了这个行为；也没有验证第三方 legacy
+function 插件在 2.0.27 + `plugins` 键下的命运（它们会被同样的 schema 拒绝，属于上游
+迁移问题，不在 Clawd 范围内）。
 
 ## ctx（setup 入参）实测
 

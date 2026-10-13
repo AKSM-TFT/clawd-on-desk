@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "name": "Ghost on Desk",
+  "version": "1.0.0",
+  "author": "Custom artwork generated with ChatGPT",
+  "description": "Photo-inspired ghost. Slow pondering and separate fingertip typing loops; static idle fallback for other events.",
+  "viewBox": {
+    "x": 0,
+    "y": 0,
+    "width": 128,
+    "height": 150
+  },
+  "preview": "idle.png",
+  "customization": {
+    "petTint": false
+  },
+  "layout": {
+    "contentBox": {
+      "x": 9,
+      "y": 24,
+      "width": 112,
+      "height": 119
+    },
+    "centerX": 64,
+    "baselineY": 143,
+    "visibleHeightRatio": 0.66,
+    "baselineBottomRatio": 0.045
+  },
+  "eyeTracking": {
+    "enabled": false,
+    "states": []
+  },
+  "states": {
+    "idle": [
+      "idle.png"
+    ],
+    "thinking": [
+      "thinking.apng"
+    ],
+    "working": [
+      "working.apng"
+    ],
+    "sleeping": [
+      "idle.png"
+    ],
+    "waking": [
+      "idle.png"
+    ],
+    "error": [
+      "idle.png"
+    ],
+    "attention": [
+      "idle.png"
+    ],
+    "notification": [
+      "idle.png"
+    ],
+    "sweeping": [
+      "working.apng"
+    ],
+    "carrying": [
+      "working.apng"
+    ],
+    "juggling": [
+      "working.apng"
+    ]
+  },
+  "sleepSequence": {
+    "mode": "direct"
+  },
+  "miniMode": {
+    "supported": false
+  },
+  "hitBoxes": {
+    "default": {
+      "x": 12,
+      "y": 25,
+      "w": 109,
+      "h": 118
+    }
+  },
+  "fileHitBoxes": {
+    "thinking.apng": {
+      "x": 12,
+      "y": 25,
+      "w": 109,
+      "h": 118
+    },
+    "working.apng": {
+      "x": 9,
+      "y": 25,
+      "w": 112,
+      "h": 118
+    }
+  },
+  "objectScale": {
+    "widthRatio": 1,
+    "heightRatio": 1,
+    "offsetX": 0,
+    "offsetY": 0
+  }
+}

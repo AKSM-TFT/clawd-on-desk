@@ -1,0 +1,32 @@
+{
+  "canvas": [
+    384,
+    450
+  ],
+  "frames_per_loop": 64,
+  "frame_duration_ms": 60,
+  "loop_duration_ms": 3840,
+  "loop": "infinite",
+  "assets": {
+    "thinking": {
+      "decoded_frame_match": true,
+      "unique_frames": 64,
+      "transparent_background": true,
+      "gif_transparency_verified": true,
+      "seam_mean_difference": 0.4891,
+      "typical_step_mean_difference": 0.3406,
+      "apng_bytes": 7884109
+    },
+    "working": {
+      "decoded_frame_match": true,
+      "unique_frames": 64,
+      "transparent_background": true,
+      "gif_transparency_verified": true,
+      "seam_mean_difference": 0.4439,
+      "typical_step_mean_difference": 0.333,
+      "apng_bytes": 7934066
+    }
+  },
+  "manifest": "JSON parsed; referenced files, core state bindings, canvas ratios and disabled-capability requirements checked.",
+  "runtime_test": "Not run inside the Clawd Electron app. Official CLI validator was not executed."
+}

@@ -1,0 +1,175 @@
+{
+  "schemaVersion": 1,
+  "name": "Jolli Kyle",
+  "version": "1.0.0",
+  "description": "Photo-collage mascot in a red-and-yellow costume. One static pose per state; no eye tracking and no mini mode.",
+  "viewBox": {
+    "x": 0,
+    "y": 0,
+    "width": 512,
+    "height": 512
+  },
+  "customization": {
+    "petTint": false
+  },
+  "layout": {
+    "contentBox": {
+      "x": 39,
+      "y": 24,
+      "width": 433,
+      "height": 471
+    },
+    "centerX": 256,
+    "baselineY": 495,
+    "visibleHeightRatio": 0.66,
+    "baselineBottomRatio": 0.045
+  },
+  "eyeTracking": {
+    "enabled": false,
+    "states": []
+  },
+  "states": {
+    "idle": [
+      "idle.png"
+    ],
+    "thinking": [
+      "thinking.png"
+    ],
+    "working": [
+      "coding.png"
+    ],
+    "juggling": [
+      "running.png"
+    ],
+    "error": [
+      "error.png"
+    ],
+    "attention": [
+      "success.png"
+    ],
+    "notification": [
+      "excited.png"
+    ],
+    "sweeping": [
+      "reviewing.png"
+    ],
+    "carrying": [
+      "food_break.png"
+    ],
+    "sleeping": [
+      "idle.png"
+    ]
+  },
+  "sleepSequence": {
+    "mode": "direct"
+  },
+  "workingTiers": [
+    {
+      "minSessions": 2,
+      "file": "running.png"
+    },
+    {
+      "minSessions": 1,
+      "file": "coding.png"
+    }
+  ],
+  "reactions": {
+    "drag": {
+      "file": "excited.png"
+    },
+    "clickLeft": {
+      "file": "celebrating.png",
+      "duration": 2500
+    },
+    "clickRight": {
+      "file": "celebrating.png",
+      "duration": 2500
+    },
+    "double": {
+      "files": [
+        "celebrating.png",
+        "excited.png"
+      ],
+      "duration": 3500
+    }
+  },
+  "hitBoxes": {
+    "default": {
+      "x": 95,
+      "y": 25,
+      "w": 325,
+      "h": 470
+    }
+  },
+  "fileHitBoxes": {
+    "idle.png": {
+      "x": 134,
+      "y": 24,
+      "w": 245,
+      "h": 472
+    },
+    "thinking.png": {
+      "x": 149,
+      "y": 24,
+      "w": 213,
+      "h": 471
+    },
+    "coding.png": {
+      "x": 112,
+      "y": 24,
+      "w": 288,
+      "h": 472
+    },
+    "running.png": {
+      "x": 91,
+      "y": 25,
+      "w": 330,
+      "h": 471
+    },
+    "error.png": {
+      "x": 128,
+      "y": 24,
+      "w": 256,
+      "h": 471
+    },
+    "success.png": {
+      "x": 91,
+      "y": 24,
+      "w": 329,
+      "h": 472
+    },
+    "excited.png": {
+      "x": 106,
+      "y": 24,
+      "w": 300,
+      "h": 471
+    },
+    "reviewing.png": {
+      "x": 75,
+      "y": 24,
+      "w": 362,
+      "h": 472
+    },
+    "food_break.png": {
+      "x": 145,
+      "y": 25,
+      "w": 224,
+      "h": 470
+    },
+    "celebrating.png": {
+      "x": 39,
+      "y": 25,
+      "w": 433,
+      "h": 470
+    }
+  },
+  "miniMode": {
+    "supported": false
+  },
+  "objectScale": {
+    "widthRatio": 1,
+    "heightRatio": 1,
+    "offsetX": 0,
+    "offsetY": 0
+  }
+}

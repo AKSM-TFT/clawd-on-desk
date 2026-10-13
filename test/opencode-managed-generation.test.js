@@ -159,6 +159,19 @@ describe("#1026 canonicalizer", () => {
   });
 });
 
+// A v2-host registration writes only the `plugins` key and a 1.x-host
+// registration writes only `plugin`; both point into the same generation.
+function registeredGenerationDir(home) {
+  const config = readJson(path.join(home, ".config", "opencode", "opencode.json"));
+  const list = config.plugins || config.plugin || [];
+  const entry = list.find((value) => typeof value === "string" && value.includes("/generations/"));
+  return path.dirname(entry.replace(/\//g, path.sep));
+}
+
+function legacyPluginDirOf(home) {
+  return path.join(registeredGenerationDir(home), "opencode-plugin");
+}
+
 describe("#1026 managed installer register/unregister", () => {
   it("fails closed before mutation when no config-dir ancestor identity can be resolved", () => {
     const home = makeHome("clawd-managed-unresolved-");
@@ -224,19 +237,19 @@ describe("#1026 managed installer register/unregister", () => {
     assert.strictEqual(result.status, "ok");
     assert.strictEqual(result.added, true);
     const config = readJson(path.join(home, ".config", "opencode", "opencode.json"));
-    assert.strictEqual(config.plugin.length, 1);
-    const entry = config.plugin[0];
+    assert.strictEqual(config.plugin, undefined, "a v2 host registers no legacy entry");
+    assert.strictEqual(config.plugins.length, 1);
+    const entry = config.plugins[0];
     assert.ok(entry.includes("/.clawd/integrations/opencode-family/opencode/homes/"), entry);
-    assert.ok(/\/generations\/[0-9a-f]{64}\/opencode-plugin$/.test(entry), entry);
+    assert.ok(/\/generations\/[0-9a-f]{64}\/opencode-plugin-v2$/.test(entry), entry);
     assert.ok(!entry.includes("app.asar"), entry);
 
-    const pluginDir = entry.replace(/\//g, path.sep);
-    const genDir = path.dirname(pluginDir);
+    const genDir = path.dirname(entry.replace(/\//g, path.sep));
     const inspected = mg.inspectGeneration(genDir, OPENCODE_CFG, "opencode", { fs });
     assert.strictEqual(inspected.ok, true, `expected valid generation: ${inspected.reason}`);
     // Bundle bytes equal the source bundle.
     const sourceFiles = mg.readSourceBundle(OPENCODE_CFG, resolveSourcePluginDir(), fs).files;
-    assert.strictEqual(mg.bundleBytesMatch(pluginDir, OPENCODE_CFG, sourceFiles, fs), true);
+    assert.strictEqual(mg.bundleBytesMatch(path.join(genDir, "opencode-plugin"), OPENCODE_CFG, sourceFiles, fs), true);
 
     // Owner record exists and is self-owned.
     const target = mg.resolveManagedTarget({ cfg: OPENCODE_CFG, agentId: "opencode", homeDir: home, fs, platform: process.platform });
@@ -283,7 +296,7 @@ describe("#1026 managed installer register/unregister", () => {
     const home = makeHome("clawd-managed-unreg-");
     registerOpencodePlugin({ silent: true, v2Host: "v2", homeDir: home });
     const configPath = path.join(home, ".config", "opencode", "opencode.json");
-    const entry = readJson(configPath).plugin[0];
+    const entry = readJson(configPath).plugins[0];
     const genDir = path.dirname(entry.replace(/\//g, path.sep));
 
     const result = unregisterOpencodePlugin({ silent: true, homeDir: home });
@@ -291,7 +304,7 @@ describe("#1026 managed installer register/unregister", () => {
     assert.strictEqual(result.registrationRemoved, true);
     assert.strictEqual(result.activeEntryRemaining, false);
     assert.strictEqual(result.managedFilesRemoved, true);
-    assert.deepStrictEqual(readJson(configPath).plugin, []);
+    assert.strictEqual(Object.hasOwn(readJson(configPath), "plugins"), false);
     assert.strictEqual(fs.existsSync(genDir), false);
   });
 
@@ -299,7 +312,7 @@ describe("#1026 managed installer register/unregister", () => {
     const home = makeHome("clawd-managed-unreg-busy-");
     registerOpencodePlugin({ silent: true, v2Host: "v2", homeDir: home });
     const configPath = path.join(home, ".config", "opencode", "opencode.json");
-    const entry = readJson(configPath).plugin[0];
+    const entry = readJson(configPath).plugins[0];
     const genDir = path.dirname(entry.replace(/\//g, path.sep));
     const target = mg.resolveManagedTarget({ cfg: OPENCODE_CFG, agentId: "opencode", homeDir: home, fs, platform: process.platform });
 
@@ -322,7 +335,7 @@ describe("#1026 managed installer register/unregister", () => {
     assert.ok(path.basename(removed.residualPaths[0]).startsWith(".cleanup-"));
     assert.strictEqual(fs.existsSync(removed.residualPaths[0]), true);
     assert.ok(removed.warnings.some((warning) => warning.includes("managed generation cleanup incomplete")));
-    assert.deepStrictEqual(readJson(configPath).plugin, []);
+    assert.strictEqual(Object.hasOwn(readJson(configPath), "plugins"), false);
     assert.strictEqual(mg.readOwnerRecord(target, "opencode", fs, {
       platform: process.platform,
       pluginDirName: "opencode-plugin",
@@ -338,7 +351,7 @@ describe("#1026 managed installer register/unregister", () => {
     const home = makeHome("clawd-managed-recover-released-");
     registerOpencodePlugin({ silent: true, v2Host: "v2", homeDir: home });
     const configPath = path.join(home, ".config", "opencode", "opencode.json");
-    const entry = readJson(configPath).plugin[0];
+    const entry = readJson(configPath).plugins[0];
     const genDir = path.dirname(entry.replace(/\//g, path.sep));
     const target = mg.resolveManagedTarget({ cfg: OPENCODE_CFG, agentId: "opencode", homeDir: home, fs, platform: process.platform });
     fs.writeFileSync(configPath, JSON.stringify({ plugin: [] }, null, 2), "utf8");
@@ -362,14 +375,14 @@ describe("#1026 managed installer register/unregister", () => {
     assert.ok(restored.warnings.some((warning) => warning.includes("released managed residual was quarantined")));
     assert.strictEqual(fs.existsSync(restored.residualPaths[0]), true, "suspicious old bytes must be preserved out of band");
     assert.strictEqual(mg.inspectGeneration(genDir, OPENCODE_CFG, "opencode", { fs }).ok, true);
-    assert.deepStrictEqual(readJson(configPath).plugin, [entry]);
+    assert.deepStrictEqual(readJson(configPath).plugins, [entry]);
   });
 
   it("does not recover a released corrupt generation absent from owner history", () => {
     const home = makeHome("clawd-managed-recover-unproven-");
     registerOpencodePlugin({ silent: true, v2Host: "v2", homeDir: home });
     const configPath = path.join(home, ".config", "opencode", "opencode.json");
-    const entry = readJson(configPath).plugin[0];
+    const entry = readJson(configPath).plugins[0];
     const genDir = path.dirname(entry.replace(/\//g, path.sep));
     const target = mg.resolveManagedTarget({ cfg: OPENCODE_CFG, agentId: "opencode", homeDir: home, fs, platform: process.platform });
     fs.writeFileSync(configPath, JSON.stringify({ plugin: [] }, null, 2), "utf8");
@@ -391,7 +404,7 @@ describe("#1026 managed installer register/unregister", () => {
     assert.strictEqual(result.status, "error");
     assert.strictEqual(result.reason, "generation-conflict");
     assert.strictEqual(fs.existsSync(genDir), true);
-    assert.deepStrictEqual(readJson(configPath).plugin, []);
+    assert.strictEqual(Object.hasOwn(readJson(configPath), "plugins"), false, "the config stays byte-identical");
   });
 
   it("keeps a foreign owner record byte-identical and warns", () => {
@@ -447,7 +460,7 @@ describe("#1026 managed installer register/unregister", () => {
     const home = makeHome("clawd-managed-conflict-");
     registerOpencodePlugin({ silent: true, v2Host: "v2", homeDir: home });
     const configPath = path.join(home, ".config", "opencode", "opencode.json");
-    const pluginDir = readJson(configPath).plugin[0].replace(/\//g, path.sep);
+    const pluginDir = legacyPluginDirOf(home);
     fs.writeFileSync(path.join(pluginDir, "index.mjs"), "// tampered\n", "utf8");
 
     const result = registerOpencodePlugin({ silent: true, v2Host: "v2", homeDir: home });

@@ -2,12 +2,10 @@
 
 // opencode v2 `plugins`-key registration tests (issue #1039).
 //
-// Runs the REAL opencode installer against temp homes and asserts the dual-key
-// contract: the v1 `plugin` entry and the v2 `plugins` entry both point into
-// the same managed generation, foreign entries (npm strings, v2-style
-// `{ package, options }` objects, tuples) survive byte-for-byte, duplicates
-// converge, fail-closed entries refuse mutation, and uninstall sweeps both
-// keys while preserving everything foreign.
+// Runs the REAL opencode installer against temp homes and asserts the key
+// contract: a detected v2 host is registered ONLY through `plugins`, a legacy
+// `plugin` entry that host cannot load is swept, and uninstall removes the
+// owned v2 entry while preserving everything foreign.
 
 const assert = require("node:assert");
 const fs = require("node:fs");
@@ -50,7 +48,7 @@ function managedRoots(home) {
 }
 
 describe("opencode v2 plugins-key registration", () => {
-  it("registers both keys into one generation; foreign v2 shapes survive verbatim", () => {
+  it("registers only the plugins key on a v2 host; foreign v2 shapes survive verbatim", () => {
     const home = makeHome();
     const foreignObject = { package: "some-opencode-plugin", options: { strict: true } };
     const foreignTuple = ["/opt/other-tools/legacy-plugin", { mode: "x" }];
@@ -63,18 +61,11 @@ describe("opencode v2 plugins-key registration", () => {
     assert.strictEqual(result.status, "ok", result.message);
 
     const cfg = readConfig(home);
-    const v1Entry = cfg.plugin.find((entry) => String(entry).includes("opencode-plugin"));
+    assert.strictEqual(cfg.plugin, undefined, "a v2 host never gets a legacy plugin key entry");
     const v2Entry = cfg.plugins.find((entry) => typeof entry === "string" && entry.includes("opencode-plugin-v2"));
-    assert.ok(v1Entry, "v1 plugin entry registered");
     assert.ok(v2Entry, "v2 plugins entry registered");
-    assert.ok(v1Entry.includes("/generations/"), "v1 entry points at the managed generation");
+    assert.ok(String(v2Entry).includes("/generations/"), "v2 entry points at the managed generation");
     assert.strictEqual(path.basename(String(v2Entry)), "opencode-plugin-v2");
-    // Same generation, sibling entry dirs.
-    assert.strictEqual(
-      path.dirname(String(v2Entry)),
-      path.dirname(String(v1Entry)),
-      "both entries live in the same generation"
-    );
     assert.deepStrictEqual(
       cfg.plugins.filter((entry) => entry !== v2Entry),
       ["oh-my-openagent@latest", foreignObject, foreignTuple],
@@ -114,10 +105,11 @@ describe("opencode v2 plugins-key registration", () => {
 
   it("re-register after external plugins-key removal restores the v2 entry", () => {
     const home = makeHome();
-    assert.strictEqual(registerOpencodePlugin({ silent: true, v2Host: "v2", ...managedRoots(home) }).status, "ok");
+    // A 1.x-host registration produces the legacy entry and its generation.
+    assert.strictEqual(registerOpencodePlugin({ silent: true, v2Host: "v1", ...managedRoots(home) }).status, "ok");
 
-    // Simulate the pre-#1039 state: the v1 entry exists but the v2 key was
-    // never written (older Clawd), then the new Clawd repairs.
+    // Simulate a config an older Clawd wrote: the legacy entry exists but the
+    // `plugins` key was never written, so the new Clawd repairs it.
     const cfg = readConfig(home);
     writeConfig(home, {
       $schema: cfg.$schema,
@@ -130,9 +122,45 @@ describe("opencode v2 plugins-key registration", () => {
       (repaired.plugins || []).some((entry) => String(entry).includes("opencode-plugin-v2")),
       "v2 entry restored"
     );
+    assert.deepStrictEqual(repaired.plugin, [], "the unloadable legacy entry is gone");
   });
 
-  it("uninstall sweeps both keys and preserves foreign entries", () => {
+  it("a detected v2 host sweeps the legacy plugin-key entry it cannot load", () => {
+    const home = makeHome();
+    // A v1 host registered this legacy entry; the host then moved to 2.x.
+    const seeded = registerOpencodePlugin({ silent: true, v2Host: "v1", ...managedRoots(home) });
+    assert.strictEqual(seeded.status, "ok");
+    assert.ok(readConfig(home).plugin.length === 1, "legacy entry exists before the upgrade");
+
+    const upgraded = registerOpencodePlugin({ silent: true, v2Host: "v2", ...managedRoots(home) });
+    assert.strictEqual(upgraded.status, "ok", upgraded.message);
+    assert.ok(
+      upgraded.warnings.some((warning) => /swept 1 legacy plugin-key entry/.test(warning)),
+      upgraded.warnings
+    );
+
+    const cfg = readConfig(home);
+    assert.deepStrictEqual(cfg.plugin, [], "opencode 2.x no longer loads the legacy entry");
+    assert.ok(
+      cfg.plugins.some((entry) => String(entry).includes("opencode-plugin-v2")),
+      "v2 entry registered"
+    );
+  });
+
+  it("leaves foreign legacy plugin-key entries alone while sweeping its own", () => {
+    const home = makeHome();
+    assert.strictEqual(registerOpencodePlugin({ silent: true, v2Host: "v1", ...managedRoots(home) }).status, "ok");
+    const seeded = readConfig(home);
+    writeConfig(home, { ...seeded, plugin: [...seeded.plugin, "third-party-opencode-plugin"] });
+
+    const upgraded = registerOpencodePlugin({ silent: true, v2Host: "v2", ...managedRoots(home) });
+    assert.strictEqual(upgraded.status, "ok", upgraded.message);
+
+    const cfg = readConfig(home);
+    assert.deepStrictEqual(cfg.plugin, ["third-party-opencode-plugin"], "only the Clawd entry is removed");
+  });
+
+  it("uninstall removes the owned v2 entry and preserves foreign entries", () => {
     const home = makeHome();
     const foreignObject = { package: "keep-me", options: { a: 1 } };
     writeConfig(home, { plugins: ["third-party@latest", foreignObject] });
@@ -145,7 +173,22 @@ describe("opencode v2 plugins-key registration", () => {
     assert.strictEqual(result.activeEntryRemaining, false);
 
     const cfg = readConfig(home);
-    assert.deepStrictEqual(cfg.plugin, [], "v1 key swept");
+    assert.deepStrictEqual(cfg.plugins, ["third-party@latest", foreignObject], "v2 owned swept, foreign kept");
+  });
+
+  it("uninstall sweeps both keys when a legacy entry is still registered", () => {
+    const home = makeHome();
+    const foreignObject = { package: "keep-me", options: { a: 1 } };
+    writeConfig(home, { plugins: ["third-party@latest", foreignObject] });
+    assert.strictEqual(registerOpencodePlugin({ silent: true, v2Host: "v2", ...managedRoots(home) }).status, "ok");
+    assert.strictEqual(registerOpencodePlugin({ silent: true, v2Host: "v1", ...managedRoots(home) }).status, "ok");
+
+    const result = unregisterOpencodePlugin({ silent: true, ...managedRoots(home) });
+    assert.strictEqual(result.status, "ok", result.message);
+    assert.strictEqual(result.registrationRemoved, true);
+
+    const cfg = readConfig(home);
+    assert.deepStrictEqual(cfg.plugin, [], "legacy key swept");
     assert.deepStrictEqual(cfg.plugins, ["third-party@latest", foreignObject], "v2 owned swept, foreign kept");
   });
 
@@ -184,7 +227,7 @@ describe("opencode v2 plugins-key registration", () => {
       registerOpencodePlugin({ silent: true, v2Host: "v2", ...managedRoots(home) });
       const before = readConfig(home);
       const owned = JSON.stringify(before.plugins[0]);
-      const plugin = `"plugin": ${JSON.stringify(before.plugin)}`;
+      const plugin = '"plugin": ["/opt/other-tools/legacy-plugin"]';
       const v2 = `"plugins" /* key note */ : [ /* list note */ ${owned} /* entry note */ ]`;
       const fields = position === "first" ? [v2, plugin, '"theme": "keep"']
         : position === "middle" ? [plugin, v2, '"theme": "keep"']
@@ -199,7 +242,12 @@ describe("opencode v2 plugins-key registration", () => {
       const parsed = require("jsonc-parser").parse(after, errors);
       assert.deepStrictEqual(errors, [], after);
       assert.strictEqual(Object.hasOwn(parsed, "plugins"), false, after);
-      assert.deepStrictEqual(parsed.plugin, before.plugin);
+      assert.ok(parsed.plugin.includes("/opt/other-tools/legacy-plugin"), "foreign legacy entry preserved");
+      assert.strictEqual(
+        parsed.plugin.filter((entry) => String(entry).includes("opencode-plugin")).length,
+        1,
+        "the 1.x-host register added exactly one managed legacy entry"
+      );
       assert.strictEqual(parsed.theme, "keep");
       for (const note of ["key note", "list note", "entry note", "before fields", "between fields", "after fields"]) {
         assert.ok(after.includes(note), `${position}: lost ${note}`);
@@ -310,20 +358,19 @@ describe("opencode v2 plugins-key registration", () => {
 
   it("PR #1045 follow-up: duplicate plugins keys abort uninstall before removing an owned v1 entry", () => {
     const home = makeHome();
-    assert.strictEqual(registerOpencodePlugin({ silent: true, v2Host: "v2", ...managedRoots(home) }).status, "ok");
-    // The config now carries a Clawd-owned v1 entry that uninstall WOULD remove
-    // (plus the v2 key). Insert a duplicate top-level `plugins` key by text edit
-    // — JSON.parse cannot express one.
+    // A 1.x-host registration leaves an owned legacy entry that uninstall
+    // WOULD remove. Insert a duplicate top-level `plugins` key by text edit —
+    // JSON.parse cannot express one.
+    assert.strictEqual(registerOpencodePlugin({ silent: true, v2Host: "v1", ...managedRoots(home) }).status, "ok");
     const registered = readConfig(home);
     assert.ok(
       registered.plugin.some((entry) => String(entry).includes("opencode-plugin")),
       "an owned v1 entry is present and removable"
     );
-    assert.strictEqual(registered.plugins.length, 1);
     const text = fs.readFileSync(configPath(home), "utf8");
     const duplicated = text.replace(
-      /("plugins"\s*:\s*\[[^\]]*\])/,
-      (_match, first) => `${first},\n  "plugins": ["/a/opencode-plugin-v2"]`
+      /\n}/,
+      ',\n  "plugins": ["/a/opencode-plugin-v2"],\n  "plugins": ["/b/opencode-plugin-v2"]\n}'
     );
     assert.notStrictEqual(duplicated, text, "duplicate plugins key inserted");
     fs.writeFileSync(configPath(home), duplicated);
