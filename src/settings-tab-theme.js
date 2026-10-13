@@ -2,6 +2,9 @@
 
 (function initSettingsTabTheme(root) {
   const PREVIEW_TARGET_CONTENT_RATIO = 0.55;
+  const CATALOG_AUTO_RETRY_DELAYS_MS = [10000, 30000];
+  const CATALOG_AUTO_RETRY_MAX = CATALOG_AUTO_RETRY_DELAYS_MS.length;
+  const CATALOG_UNAVAILABLE_ERROR_CODE = "OFFICIAL_THEME_CATALOG_UNAVAILABLE";
 
   let state = null;
   let runtime = null;
@@ -12,8 +15,17 @@
   let customizationSelectionPendingThemeId = null;
   let customizationSelectionSeq = 0;
   let mountedCustomizationControls = null;
+  // Live handles for the theme LIST (the grid of cards). Populated by render()
+  // while the list view is mounted so state updates — official-download
+  // progress in particular, which fires many times per download — can patch
+  // the affected rows in place instead of re-rendering the whole list (a full
+  // re-render tears down every card, which drops the CSS hover highlight the
+  // cursor is sitting on).
+  let mountedThemeList = null;
   let themeListScrollTop = 0;
   let customizationReturnFocusKey = "";
+  let catalogAutoRetryTimer = null;
+  let catalogAutoRetryAttempts = 0;
 
   function getContentElement() {
     return document.getElementById("content");
@@ -47,6 +59,7 @@
 
   function render(parent) {
     mountedCustomizationControls = null;
+    mountedThemeList = null;
     const detailTheme = Array.isArray(runtime.themeList)
       ? runtime.themeList.find((theme) => (
         theme
@@ -61,6 +74,10 @@
     }
     customizingThemeId = null;
 
+    // List handles must exist before buildThemeActions() so it can register
+    // its import/refresh buttons for in-place pending patches.
+    mountedThemeList = { officialControls: new Map(), actions: null };
+
     const h1 = document.createElement("h1");
     h1.textContent = t("themeTitle");
     parent.appendChild(h1);
@@ -70,15 +87,7 @@
     subtitle.textContent = t("themeSubtitle");
     parent.appendChild(subtitle);
     parent.appendChild(buildThemeActions());
-
-    // `offline` is a list-level condition, not a per-theme state: it only adds
-    // a note beside whatever cards are already known.
-    if (runtime.officialThemeListFetched && runtime.officialThemeCatalogStatus === "offline") {
-      const note = document.createElement("div");
-      note.className = "placeholder-desc theme-official-offline-note";
-      note.textContent = t("themeOfficialOffline");
-      parent.appendChild(note);
-    }
+    maybeScheduleCatalogAutoRetry();
 
     if (runtime.themeList === null) {
       const loading = document.createElement("div");
@@ -109,6 +118,10 @@
       title.textContent = section.title;
       sectionEl.appendChild(title);
 
+      if (section.id === "official" && catalogIsOffline()) {
+        sectionEl.appendChild(buildOfficialOfflineBanner());
+      }
+
       const grid = document.createElement("div");
       grid.className = "theme-grid";
       for (const theme of section.themes) {
@@ -117,26 +130,58 @@
       sectionEl.appendChild(grid);
       parent.appendChild(sectionEl);
     }
+
+    // Remember the exact list data this render was built from so a later
+    // progress patch can tell whether a full re-render is actually needed.
+    mountedThemeList.dataKey = officialListDataKey();
   }
 
-  function getThemeSections(themes) {
+  // The official section renders from the catalog list; the local theme list
+  // stays the runtime authority for active selection and capabilities. Shared
+  // by the list render and the in-place progress patch so both always agree on
+  // what an official card currently looks like.
+  function getMergedOfficialThemes() {
     const localById = new Map(
-      (themes || [])
+      (Array.isArray(runtime.themeList) ? runtime.themeList : [])
         .filter((theme) => theme && theme.id)
         .map((theme) => [theme.id, theme])
     );
-    const officialThemes = (Array.isArray(runtime.officialThemeList) ? runtime.officialThemeList : [])
+    return (Array.isArray(runtime.officialThemeList) ? runtime.officialThemeList : [])
       .map((theme) => {
         const localTheme = theme && localById.get(theme.id);
         if (!localTheme) return theme;
-        // The local list is the runtime authority for active selection and
-        // capabilities. The catalog list owns distribution/install metadata.
         return {
           ...theme,
           active: !!localTheme.active,
           capabilities: localTheme.capabilities || theme.capabilities,
         };
       });
+  }
+
+  // A local entry can still carry `officialTheme` fields from an earlier
+  // catalog that has since dropped its id. Strip them so the card renders (and
+  // can be selected/deleted) as a plain user theme.
+  function withoutStaleOfficialDecoration(theme) {
+    const next = { ...theme };
+    for (const key of [
+      "officialTheme",
+      "managedOfficialTheme",
+      "officialThemeState",
+      "officialThemeVersion",
+      "officialThemeInstalledVersion",
+      "officialThemeCatalogVersion",
+      "officialThemeBytes",
+      "officialThemeUnpackedBytes",
+      "officialThemeCanUninstall",
+      "officialThemeConflict",
+    ]) {
+      delete next[key];
+    }
+    return next;
+  }
+
+  function getThemeSections(themes) {
+    const officialThemes = getMergedOfficialThemes();
     const officialIds = new Set(officialThemes.map((theme) => theme && theme.id).filter(Boolean));
     const groups = {
       builtin: [],
@@ -146,19 +191,122 @@
     };
     for (const theme of themes || []) {
       if (!theme) continue;
-      if (theme.builtin) groups.builtin.push(theme);
-      else if (theme.managedCodexPet) groups.importedCodexPets.push(theme);
-      // The official section owns every official id (installed or not); the
-      // local list entry would otherwise render a duplicate user card.
-      else if (theme.officialTheme || officialIds.has(theme.id)) continue;
-      else groups.user.push(theme);
+      if (theme.builtin) { groups.builtin.push(theme); continue; }
+      if (theme.managedCodexPet) { groups.importedCodexPets.push(theme); continue; }
+      // The official section owns a local entry only when it actually has a
+      // matching card (installed or in the catalog), or when the official
+      // manager owns it via a marker. A stale `officialTheme` flag left over
+      // from a catalog that no longer lists this id must not hide the theme:
+      // it returns to the user section as an ordinary user theme.
+      if (officialIds.has(theme.id) || theme.managedOfficialTheme === true) continue;
+      groups.user.push(theme.officialTheme === true ? withoutStaleOfficialDecoration(theme) : theme);
     }
+    // A failed catalog must still surface the official section so the offline
+    // banner and its Retry button are reachable even when no card is known.
+    const showOfficialSection = groups.official.length > 0 || catalogIsOffline();
     return [
       { id: "builtin", title: t("themeGroupBuiltIn"), themes: groups.builtin },
       { id: "official", title: t("themeGroupOfficialThemes"), themes: groups.official },
       { id: "imported-codex-pets", title: t("themeGroupImportedCodexPets"), themes: groups.importedCodexPets },
       { id: "user", title: t("themeGroupUserThemes"), themes: groups.user },
-    ].filter((section) => section.themes.length > 0);
+    ].filter((section) => section.themes.length > 0
+      || (section.id === "official" && showOfficialSection));
+  }
+
+  function catalogIsOffline() {
+    return !!runtime.officialThemeListFetched
+      && (runtime.officialThemeCatalogStatus === "offline"
+        || runtime.officialThemeCatalogStatus === "invalid");
+  }
+
+  function catalogRetrying() {
+    return !!runtime.officialThemeCatalogRetrying;
+  }
+
+  function syncCatalogRetryControls() {
+    const controls = mountedThemeList && mountedThemeList.catalogRetry;
+    if (!controls) return false;
+    const retrying = catalogRetrying();
+    controls.button.textContent = t(retrying ? "themeOfficialRetrying" : "themeOfficialRetry");
+    controls.button.disabled = retrying;
+    controls.button.classList.toggle("pending", retrying);
+    return true;
+  }
+
+  function buildOfficialOfflineBanner() {
+    const banner = document.createElement("div");
+    banner.className = "theme-official-offline-banner";
+    banner.setAttribute("role", "status");
+    const message = document.createElement("span");
+    message.className = "theme-official-offline-message";
+    message.textContent = t(getMergedOfficialThemes().length > 0
+      ? "themeOfficialOfflineWithList"
+      : "themeOfficialOfflineNoList");
+    banner.appendChild(message);
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "theme-official-offline-retry";
+    retry.setAttribute("data-settings-focus-key", "theme-official-offline-retry");
+    retry.addEventListener("click", handleCatalogRetry);
+    banner.appendChild(retry);
+    if (mountedThemeList) mountedThemeList.catalogRetry = { button: retry, message };
+    syncCatalogRetryControls();
+    return banner;
+  }
+
+  function cancelCatalogAutoRetry() {
+    if (catalogAutoRetryTimer === null) return;
+    root.clearTimeout(catalogAutoRetryTimer);
+    catalogAutoRetryTimer = null;
+  }
+
+  // The automatic budget is per failure episode: each time the catalog goes
+  // from healthy back to failing, up to two automatic retries (10s, then 30s)
+  // are scheduled. A success resets the count, so a later failure episode gets
+  // its own two attempts; with no new failure nothing is scheduled.
+  function maybeScheduleCatalogAutoRetry() {
+    if (state.activeTab !== "theme") return;
+    if (catalogRetrying()) return;
+    if (!catalogIsOffline()) {
+      catalogAutoRetryAttempts = 0;
+      cancelCatalogAutoRetry();
+      return;
+    }
+    if (catalogAutoRetryAttempts >= CATALOG_AUTO_RETRY_MAX) return;
+    if (catalogAutoRetryTimer !== null) return;
+    const delay = CATALOG_AUTO_RETRY_DELAYS_MS[Math.min(
+      catalogAutoRetryAttempts,
+      CATALOG_AUTO_RETRY_DELAYS_MS.length - 1,
+    )];
+    catalogAutoRetryTimer = root.setTimeout(() => {
+      catalogAutoRetryTimer = null;
+      if (state.activeTab !== "theme") return;
+      if (catalogRetrying()) return;
+      catalogAutoRetryAttempts += 1;
+      startCatalogRetry();
+    }, delay);
+  }
+
+  // Reuses the ordinary list request path. `fetchOfficialThemes` is
+  // single-flight, so a manual or automatic retry can never stack on top of an
+  // in-flight read.
+  function startCatalogRetry() {
+    if (catalogRetrying()) return Promise.resolve();
+    runtime.officialThemeCatalogRetrying = true;
+    syncCatalogRetryControls();
+    const local = ops.fetchThemes();
+    const official = ops.fetchOfficialThemes();
+    return Promise.allSettled([local, official]).then(() => {
+      runtime.officialThemeCatalogRetrying = false;
+      if (state.activeTab === "theme") {
+        ops.requestRender({ content: true, preserveScroll: true });
+      }
+    });
+  }
+
+  function handleCatalogRetry() {
+    cancelCatalogAutoRetry();
+    return startCatalogRetry();
   }
 
   function localizeField(value) {
@@ -832,6 +980,9 @@
     refreshThemesBtn.addEventListener("click", handleRefreshThemes);
     userThemeGroup.buttons.appendChild(refreshThemesBtn);
     row.appendChild(userThemeGroup.group);
+    if (mountedThemeList) {
+      mountedThemeList.actions = { importBtn, refreshBtn, importThemeBtn };
+    }
 
     return row;
   }
@@ -856,6 +1007,9 @@
   function getOfficialProgress(theme) {
     const operation = runtime.officialThemeOperation;
     if (operation && operation.id === theme.id) return operation;
+    // A per-card snapshot is only meaningful before the renderer has observed
+    // the operation end; after that it may be a stale live-download reading.
+    if (!ops.officialProgressSnapshotsTrusted()) return null;
     return theme.officialThemeProgress || null;
   }
 
@@ -863,6 +1017,46 @@
     const value = t(key);
     if (typeof value === "function") return value(...args);
     return String(value);
+  }
+
+  // A missing catalog has its own localized copy; every other failure keeps the
+  // existing "install failed: <message>" wording.
+  function formatOfficialInstallFailure(result) {
+    if (result && result.code === CATALOG_UNAVAILABLE_ERROR_CODE) {
+      return t("toastOfficialThemeCatalogUnavailable");
+    }
+    return formatOfficialMessage("toastOfficialThemeInstallFailed", (result && result.message) || "unknown error");
+  }
+
+  // True while any official install is in flight. `officialThemePendingThemeId`
+  // only covers installs this renderer started; the operation mirror also sees a
+  // download that was already running when this Settings view was (re)opened.
+  // A list snapshot can establish the same before the next progress event, and
+  // the post-operation refresh keeps the buttons disabled until the fresh list
+  // lands. Other cards' download/retry buttons must stay disabled in every case.
+  function officialOperationBusy() {
+    if (runtime.officialThemePendingThemeId) return true;
+    const operation = runtime.officialThemeOperation;
+    if (operation
+      && (operation.phase === "downloading"
+        || operation.phase === "extracting"
+        || operation.phase === "installing")) {
+      return true;
+    }
+    if (runtime.officialThemeEndRefresh) return true;
+    if (ops.officialProgressSnapshotsTrusted()) {
+      const officialThemes = Array.isArray(runtime.officialThemeList) ? runtime.officialThemeList : [];
+      return officialThemes.some((theme) => {
+        const snapshot = theme && theme.officialThemeProgress;
+        return !!(
+          snapshot
+          && (snapshot.phase === "downloading"
+            || snapshot.phase === "extracting"
+            || snapshot.phase === "installing")
+        );
+      });
+    }
+    return false;
   }
 
   function buildOfficialThemeControls(theme) {
@@ -941,7 +1135,7 @@
         formatOfficialMessage("themeOfficialDownloadLabel", mib),
         "theme-official-download-btn",
         () => handleInstallOfficialTheme(theme),
-        { disabled: !!runtime.officialThemePendingThemeId, focusKey: `official-download:${theme.id}` }
+        { disabled: officialOperationBusy(), focusKey: `official-download:${theme.id}` }
       );
       return nodes;
     }
@@ -988,13 +1182,144 @@
 
     // error / unknown: surface the stable category and offer a retry.
     if (theme.officialThemeError && theme.officialThemeError.message) {
-      pushText(formatOfficialMessage("themeOfficialError", theme.officialThemeError.message));
+      if (theme.officialThemeError.code === CATALOG_UNAVAILABLE_ERROR_CODE) {
+        pushText(t("toastOfficialThemeCatalogUnavailable"));
+      } else {
+        pushText(formatOfficialMessage("themeOfficialError", theme.officialThemeError.message));
+      }
     }
     pushButton(t("themeOfficialRetry"), "theme-official-retry-btn", () => handleInstallOfficialTheme(theme), {
-      disabled: !!runtime.officialThemePendingThemeId,
+      disabled: officialOperationBusy(),
       focusKey: `official-retry:${theme.id}`,
     });
     return nodes;
+  }
+
+  // Everything about an official row that can change while the LIST DATA stays
+  // the same: the progress phase (busy vs. cancelled/installed) and whether any
+  // install is in flight (which gates the download/retry buttons). Every other
+  // structural input — card state, version, error, bytes, selection, catalog
+  // status — is covered by officialListDataKey() below, so data changes force a
+  // full render instead of a row patch.
+  function officialControlsSignature(theme, progress) {
+    return JSON.stringify([
+      progress ? progress.phase : null,
+      officialOperationBusy() ? 1 : 0,
+    ]);
+  }
+
+  // Fingerprint of everything the theme list render depends on EXCEPT the
+  // per-card official download progress snapshot (which changes many times per
+  // second and is patched in place). That covers both the official catalog
+  // (additions, byte changes, selection, offline notes) and the local list that
+  // drives the builtin / Codex Pet / user sections, which a row patch cannot
+  // create or update. When this differs from what the mounted list was built
+  // from, patchOfficialThemeProgress() bails so ui-core re-renders the content.
+  function officialListDataKey() {
+    const themes = getMergedOfficialThemes().map((theme) => {
+      if (!theme || typeof theme !== "object") return theme;
+      const { officialThemeProgress, ...rest } = theme;
+      return rest;
+    });
+    return JSON.stringify([
+      !!runtime.officialThemeListFetched,
+      runtime.officialThemeCatalogStatus,
+      themes,
+      runtime.themeList,
+    ]);
+  }
+
+  // Patch one card's official row in place. A structural change (phase flip,
+  // install finished, ...) rebuilds only that row; a pure progress tick only
+  // updates the bar width and label, so the card DOM — and any hover
+  // highlight on it — survives the whole download.
+  function patchOfficialControlsEntry(entry, theme) {
+    const progress = getOfficialProgress(theme);
+    const signature = officialControlsSignature(theme, progress);
+    if (signature !== entry.signature) {
+      // Rebuilding this row detaches whatever had keyboard focus inside it; a
+      // full content render is what normally restores focus, so capture the key
+      // here and put it back on the equivalent new button. Focus outside the row
+      // (and a button that no longer exists, e.g. Cancel after installing) is
+      // left alone.
+      const active = document.activeElement;
+      let focusKey = "";
+      if (active
+        && active !== document.body
+        && typeof entry.container.contains === "function"
+        && entry.container.contains(active)
+        && typeof active.getAttribute === "function") {
+        focusKey = String(active.getAttribute("data-settings-focus-key") || "").trim();
+      }
+      entry.container.textContent = "";
+      for (const node of buildOfficialThemeControls(theme)) entry.container.appendChild(node);
+      entry.signature = signature;
+      if (focusKey) ops.focusSettingsTarget(entry.container, focusKey, { onlyIfFocusLost: true });
+      return;
+    }
+    if (!progress) return;
+    const bar = typeof entry.container.querySelector === "function"
+      ? entry.container.querySelector(".theme-official-progress")
+      : null;
+    if (!bar) return;
+    const pct = progress.totalBytes > 0
+      ? Math.min(100, Math.floor((progress.receivedBytes / progress.totalBytes) * 100))
+      : 0;
+    bar.setAttribute("aria-valuenow", String(pct));
+    const inner = typeof bar.querySelector === "function"
+      ? bar.querySelector(".theme-official-progress-bar")
+      : null;
+    if (inner) inner.style.width = `${pct}%`;
+    const note = typeof entry.container.querySelector === "function"
+      ? entry.container.querySelector(".theme-official-note")
+      : null;
+    if (note) {
+      if (progress.phase === "downloading") note.textContent = formatOfficialMessage("themeOfficialDownloading", pct);
+      else if (progress.phase === "extracting") note.textContent = t("themeOfficialVerifying");
+      else note.textContent = t("themeOfficialInstalling");
+    }
+  }
+
+  // Pending flags only change how the action buttons look. Re-rendering the
+  // whole list for them tears down every card (and any hover highlight under
+  // the cursor), so the import/refresh handlers patch the buttons instead.
+  function syncThemePendingStates() {
+    if (!mountedThemeList || !mountedThemeList.actions) return false;
+    const api = window.settingsAPI || {};
+    const { importBtn, refreshBtn, importThemeBtn } = mountedThemeList.actions;
+    const apply = (btn, available, pending) => {
+      if (!btn) return;
+      // Keep disabled/pending/aria-busy in one place so the button's ARIA state
+      // can never drift from its visual state after a pending round trip.
+      helpers.setButtonState(btn, { disabled: !available, pending: !!pending });
+    };
+    apply(importBtn, typeof api.importCodexPetZip === "function", !!runtime.codexPetZipImportPending);
+    apply(refreshBtn, typeof api.refreshCodexPets === "function", !!runtime.codexPetsRefreshPending);
+    apply(importThemeBtn, typeof api.importUserThemeZip === "function", !!runtime.userThemeZipImportPending);
+    return true;
+  }
+
+  // Returns true when every mounted official row was patched in place (the
+  // caller can then skip the full list re-render). False means the list no
+  // longer matches the data — e.g. a theme was added or removed — and the
+  // caller must fall back to a full render.
+  function patchOfficialThemeProgress() {
+    // The theme customization detail view has no official download content, so
+    // progress events must not tear it down and rebuild it many times per
+    // second. Nothing to patch, but the caller can safely skip the full render.
+    if (mountedCustomizationControls) return true;
+    if (!mountedThemeList || mountedThemeList.officialControls.size === 0) return false;
+    if (mountedThemeList.dataKey !== officialListDataKey()) return false;
+    const officialThemes = getMergedOfficialThemes();
+    const byId = new Map(
+      officialThemes.filter((theme) => theme && theme.id).map((theme) => [theme.id, theme])
+    );
+    for (const [themeId, entry] of mountedThemeList.officialControls) {
+      const theme = byId.get(themeId);
+      if (!theme) return false;
+      patchOfficialControlsEntry(entry, theme);
+    }
+    return true;
   }
 
   function handleInstallOfficialTheme(theme) {
@@ -1007,14 +1332,16 @@
       receivedBytes: 0,
       totalBytes: Number.isFinite(theme.officialThemeBytes) ? theme.officialThemeBytes : 0,
     };
-    if (state.activeTab === "theme") ops.requestRender({ content: true, preserveScroll: true });
+    // Patch the affected row instead of re-rendering the list: this runs when
+    // the user just clicked a download button, and a full re-render here also
+    // throws away the hover highlight under the cursor.
+    if (state.activeTab === "theme" && !patchOfficialThemeProgress()) {
+      ops.requestRender({ content: true, preserveScroll: true });
+    }
     window.settingsAPI.installOfficialTheme(theme.id)
       .then((result) => {
         if (!result || result.status !== "ok") {
-          ops.showToast(
-            formatOfficialMessage("toastOfficialThemeInstallFailed", (result && result.message) || "unknown error"),
-            { error: true }
-          );
+          ops.showToast(formatOfficialInstallFailure(result), { error: true });
           return null;
         }
         ops.showToast(formatOfficialMessage("toastOfficialThemeInstallOk", localizeField(theme.name) || theme.id));
@@ -1029,9 +1356,9 @@
       .finally(() => {
         runtime.officialThemePendingThemeId = null;
         runtime.officialThemeOperation = null;
-        ops.fetchThemes().then(() => {
-          if (state.activeTab === "theme") ops.requestRender({ content: true });
-        });
+        // The shared post-operation refresh waits out any read that started
+        // before the install finished, then fetches a fresh terminal list.
+        ops.refreshThemesAfterOfficialOperation();
       });
   }
 
@@ -1185,7 +1512,19 @@
       footer.appendChild(btn);
     }
     if (isOfficial) {
-      for (const node of buildOfficialThemeControls(theme)) footer.appendChild(node);
+      // One wrapper per card so an in-place progress patch can rebuild just
+      // this card's official row (display: contents keeps the flex layout
+      // identical to appending the nodes directly to the footer).
+      const controls = document.createElement("div");
+      controls.className = "theme-official-controls";
+      for (const node of buildOfficialThemeControls(theme)) controls.appendChild(node);
+      footer.appendChild(controls);
+      if (mountedThemeList) {
+        mountedThemeList.officialControls.set(theme.id, {
+          container: controls,
+          signature: officialControlsSignature(theme, getOfficialProgress(theme)),
+        });
+      }
     } else {
       if (canDelete) {
         const btn = document.createElement("button");
@@ -1259,7 +1598,9 @@
   function handleRefreshCodexPets() {
     if (!window.settingsAPI || typeof window.settingsAPI.refreshCodexPets !== "function") return;
     runtime.codexPetsRefreshPending = true;
-    if (state.activeTab === "theme") ops.requestRender({ content: true });
+    if (state.activeTab === "theme" && !syncThemePendingStates()) {
+      ops.requestRender({ content: true });
+    }
     window.settingsAPI.refreshCodexPets()
       .then((result) => {
         if (!result || result.status !== "ok") {
@@ -1276,7 +1617,9 @@
       })
       .finally(() => {
         runtime.codexPetsRefreshPending = false;
-        if (state.activeTab === "theme") ops.requestRender({ content: true });
+        if (state.activeTab === "theme" && !syncThemePendingStates()) {
+          ops.requestRender({ content: true });
+        }
       });
   }
 
@@ -1315,7 +1658,9 @@
   function handleImportUserThemeZip() {
     if (!window.settingsAPI || typeof window.settingsAPI.importUserThemeZip !== "function") return;
     runtime.userThemeZipImportPending = true;
-    if (state.activeTab === "theme") ops.requestRender({ content: true });
+    if (state.activeTab === "theme" && !syncThemePendingStates()) {
+      ops.requestRender({ content: true });
+    }
     window.settingsAPI.importUserThemeZip()
       .then((result) => {
         if (!result || result.status === "cancel") return null;
@@ -1333,7 +1678,9 @@
       })
       .finally(() => {
         runtime.userThemeZipImportPending = false;
-        if (state.activeTab === "theme") ops.requestRender({ content: true });
+        if (state.activeTab === "theme" && !syncThemePendingStates()) {
+          ops.requestRender({ content: true });
+        }
       });
   }
 
@@ -1354,7 +1701,9 @@
   function handleImportCodexPetZip() {
     if (!window.settingsAPI || typeof window.settingsAPI.importCodexPetZip !== "function") return;
     runtime.codexPetZipImportPending = true;
-    if (state.activeTab === "theme") ops.requestRender({ content: true });
+    if (state.activeTab === "theme" && !syncThemePendingStates()) {
+      ops.requestRender({ content: true });
+    }
     window.settingsAPI.importCodexPetZip()
       .then((result) => {
         if (!result || result.status === "cancel") return null;
@@ -1372,7 +1721,9 @@
       })
       .finally(() => {
         runtime.codexPetZipImportPending = false;
-        if (state.activeTab === "theme") ops.requestRender({ content: true });
+        if (state.activeTab === "theme" && !syncThemePendingStates()) {
+          ops.requestRender({ content: true });
+        }
       });
   }
 
@@ -1449,13 +1800,18 @@
     core.tabs.theme = {
       render,
       patchInPlace,
+      // Official-theme progress arrives many times per download; the tab
+      // patches its own rows so ui-core can skip the full content render.
+      patchOfficialThemeProgress,
       onExit() {
         customizationSelectionSeq += 1;
         customizingThemeId = null;
         customizationSelectionPendingThemeId = null;
         mountedCustomizationControls = null;
+        mountedThemeList = null;
         themeListScrollTop = 0;
         customizationReturnFocusKey = "";
+        cancelCatalogAutoRetry();
       },
     };
   }

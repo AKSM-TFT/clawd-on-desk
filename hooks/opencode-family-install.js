@@ -420,7 +420,10 @@ function makeFamilyInstaller(agentId) {
     // Managed-register only — the pluginDir override path (test-only) keeps the
     // single-entry v1 contract. The write follows the detected host (upstream
     // PR #1045 review — opencode <= 1.18.15 rejects unknown top-level keys):
-    //   "register" — v2 host detected: write/verify the entry (previous behavior)
+    //   "register" — v2 host detected: write/verify the entry. The legacy
+    //                `plugin` key is swept in the same pass (v1SweepOnly):
+    //                opencode 2.x runs its strict loader on that key too and
+    //                rejects Clawd's v1 function entry ("Plugin failed").
     //   "sweep"    — v1 host detected: never write; sweep proven-owned
     //                leftovers so a v2→v1 downgrade self-heals on the next sync
     //   "skip"     — host unknown (probe failed): never touch the key
@@ -433,14 +436,6 @@ function makeFamilyInstaller(agentId) {
       const v2Host = hostDetect.__test.normalizeHostDetection(options.v2Host);
       return v2Host === "v2" ? "register" : v2Host === "v1" ? "sweep" : "skip";
     })();
-    // A v2 host applies the v2 plugin schema to the legacy `plugin` key as
-    // soon as the `plugins` key exists (opencode 2.0.27 rejects the v1 function
-    // entry with SchemaError "Expected object at [\"default\"]"), so registering
-    // both keys turns every start into a "Plugin failed" load error. Sweep the
-    // legacy key instead of writing it. "unknown" keeps registering it: a
-    // config carrying only the legacy key is what every 1.x host needs, and
-    // opencode 2.x loads a lone legacy entry without complaint.
-    const v1Mode = v2Mode === "register" ? "sweep" : "register";
     let expectedCanonicalV2Dir = null;
     let canonicalV2Entry = null;
     if (v2Mode !== "skip") {
@@ -450,6 +445,18 @@ function makeFamilyInstaller(agentId) {
       );
       canonicalV2Entry = toEntryPath(path.join(genDir, cfg.v2PluginDirName));
     }
+
+    // The v1 `plugin` key is "sweep-only" on a detected v2 host. opencode 2.x
+    // loads the legacy `plugin` key through the SAME strict loader as `plugins`
+    // (a definition object with id + effect/setup is required), so Clawd's v1
+    // function entry is a hard load failure there: the TUI surfaces
+    // "Plugin failed: <path>" and `opencode plugin list` prints id `-`. Clawd
+    // must therefore never leave a v1 entry in `plugin` on a v2 host — the
+    // register walks the normal path with `sweepOnly`, removing any proven-owned
+    // v1 entry and (when no config exists) creating the object-root config the
+    // v2 `plugins` write needs. A v1 / unknown host keeps registering the
+    // function entry (sweepOnly false), so opencode 1.x is unaffected.
+    const v1SweepOnly = v2Mode === "register";
 
     let ownerRecord = null;
     const ownerOptions = { platform, pluginDirName: cfg.pluginDirName };
@@ -529,37 +536,6 @@ function makeFamilyInstaller(agentId) {
       : null;
     const v2Warnings = (v2Pre) => (v2Pre && Array.isArray(v2Pre.warnings) ? v2Pre.warnings : []);
 
-    // One read-only view of the legacy `plugin` key for both modes. Register
-    // mode keeps the existing fail-closed review; sweep mode only counts what
-    // the sweep can remove, mirroring how the v1-host v2 sweep stays
-    // best-effort so leftover debris never blocks the working registration.
-    const inspectV1Key = (stateCandidates) => {
-      if (v1Mode === "sweep") {
-        const sweep = jsonc.inspectManagedUnregister({ candidates: stateCandidates, makeContext });
-        return {
-          mode: v1Mode,
-          needsMutation: sweep.hasRemovable,
-          needsReview: null,
-          effective: sweep.effective,
-          warnings: sweep.warnings || [],
-        };
-      }
-      const registerView = jsonc.inspectManagedRegister({
-        cfg,
-        configPath,
-        candidates: stateCandidates,
-        makeContext,
-        canonicalEntry,
-      });
-      return {
-        mode: v1Mode,
-        needsMutation: registerView.needsMutation,
-        needsReview: registerView.needsReview,
-        effective: registerView.effective,
-        warnings: registerView.warnings || [],
-      };
-    };
-
     // Read-only pre-scan. The v2 candidates are read up front too, so an
     // ambiguous `plugins` key aborts register with ZERO config change instead
     // of throwing after the v1 key was already half-written.
@@ -579,7 +555,7 @@ function makeFamilyInstaller(agentId) {
     const v2ReadWarning = v2Read && !v2Read.ok
       ? `v2 plugins-key leftover sweep skipped: ${v2ReadErrorMessage(v2Read.error)}`
       : null;
-    const pre = inspectV1Key(candidates);
+    const pre = jsonc.inspectManagedRegister({ cfg, configPath, candidates, makeContext, canonicalEntry, sweepOnly: v1SweepOnly });
     const v2Pre = v2Mode === "register"
       ? getV2Registrar().inspectV2Register({ cfg, configPath, candidates: v2Candidates, makeContext: makeV2Context, canonicalV2Entry })
       : null;
@@ -697,7 +673,7 @@ function makeFamilyInstaller(agentId) {
           };
         }
       }
-      const lockedPre = inspectV1Key(candidates);
+      const lockedPre = jsonc.inspectManagedRegister({ cfg, configPath, candidates, makeContext, canonicalEntry, sweepOnly: v1SweepOnly });
       const lockedV2Pre = v2Mode === "register"
         ? getV2Registrar().inspectV2Register({ cfg, configPath, candidates: lockedV2Candidates, makeContext: makeV2Context, canonicalV2Entry })
         : null;
@@ -783,14 +759,14 @@ function makeFamilyInstaller(agentId) {
         }
       }
 
-      // Materialize/claim only for a real key or owner mutation. A v2-sweep
-      // mutation targets the already-verified current generation —
-      // re-materializing or re-claiming ownership for it would be a spurious
-      // write. The v2 register mutation does need the generation: on a v2 host
-      // the legacy key is swept instead of written, so a fresh install has no
-      // v1-key mutation to drive it.
-      const v2RegisterNeedsGeneration = !!(lockedV2Pre && lockedV2Pre.needsMutation);
-      if (!isOverride && (lockedPre.needsMutation || v2RegisterNeedsGeneration)) {
+      // Materialize/claim for a v1-key mutation, a v2 register mutation (which
+      // needs the generation the `plugins` entry points at — on a v2 host there
+      // may be no v1 register to create it), or an owner claim. A v2 SWEEP of
+      // leftover entries targets the already-verified current generation, so it
+      // must not trigger a spurious re-materialization.
+      const needsMaterialization = lockedPre.needsMutation
+        || (v2Mode === "register" && lockedV2Pre.needsMutation);
+      if (!isOverride && needsMaterialization) {
         const materialized = managedGeneration.materializeGeneration(target, cfg, sourcePluginDir, {
           fs: fsImpl,
           platform,
@@ -815,8 +791,7 @@ function makeFamilyInstaller(agentId) {
       // Claim/refresh the owner exactly once and only when needed. This is
       // what lets a new source take over a dead previous one; a live other
       // source already returned owner-conflict above.
-      const ownerUpdated = !isOverride
-        && (lockedPre.needsMutation || v2RegisterNeedsGeneration || lockedOwnerNeedsMutation);
+      const ownerUpdated = !isOverride && (needsMaterialization || lockedOwnerNeedsMutation);
       if (ownerUpdated) {
         managedGeneration.writeOwnerRecord(target, {
           agentId,
@@ -827,8 +802,8 @@ function makeFamilyInstaller(agentId) {
       }
 
       let apply = { status: "ok", added: false, created: false, mutatedPaths: [], warnings: [], legacyLiterals: [] };
-      if (lockedPre.mode === "register" && lockedPre.needsMutation) {
-        apply = jsonc.applyManagedRegister({ cfg, configPath, candidates, makeContext, canonicalEntry, options });
+      if (lockedPre.needsMutation) {
+        apply = jsonc.applyManagedRegister({ cfg, configPath, candidates, makeContext, canonicalEntry, options, sweepOnly: v1SweepOnly });
         if (apply.status !== "ok") {
           return {
             status: "error",
@@ -841,61 +816,40 @@ function makeFamilyInstaller(agentId) {
             warnings: [...recoveryWarnings, ...lockedWarnings, ...(apply.warnings || [])],
           };
         }
-        const verify = jsonc.verifyManagedRegisterPostcondition({
-          cfg,
-          configPath,
-          makeContext,
-          legacyLiterals: apply.legacyLiterals,
-        });
-        if (!verify.ok) {
-          return {
-            status: "error",
-            reason: "postcondition-failed",
-            message: `config postcondition not met after write: ${verify.reason}`,
+        // A sweep-only write leaves the v1 `plugin` key Clawd-free, so the
+        // "exactly one canonical v1 entry" postcondition does not apply; the
+        // v2-key postcondition below is the effective one on a v2 host.
+        if (!v1SweepOnly) {
+          const verify = jsonc.verifyManagedRegisterPostcondition({
+            cfg,
             configPath,
-            pluginDir: canonicalEntry,
-            mutatedPaths: apply.mutatedPaths,
-            residualPaths: recoveryResidualPaths,
-            warnings: [...recoveryWarnings, ...lockedWarnings, ...(apply.warnings || [])],
-          };
+            makeContext,
+            legacyLiterals: apply.legacyLiterals,
+          });
+          if (!verify.ok) {
+            return {
+              status: "error",
+              reason: "postcondition-failed",
+              message: `config postcondition not met after write: ${verify.reason}`,
+              configPath,
+              pluginDir: canonicalEntry,
+              mutatedPaths: apply.mutatedPaths,
+              residualPaths: recoveryResidualPaths,
+              warnings: [...recoveryWarnings, ...lockedWarnings, ...(apply.warnings || [])],
+            };
+          }
         }
       }
-
-      // Sweep mode (v2 host detected): drop the proven-owned legacy `plugin`
-      // entry, which that host refuses to load once the `plugins` key exists.
-      // Runs on the candidates read at the top of this lock, before the v2
-      // write re-reads them. Best-effort by contract, same bargain as the
-      // v1-host v2 sweep below: a fail-closed entry or an unconfirmable
-      // legacy-missing candidate only warns, it never fails the registration.
-      let v1SweepApply = null;
-      if (lockedPre.mode === "sweep" && lockedPre.needsMutation) {
-        v1SweepApply = jsonc.applyManagedUnregister({ cfg, configPath, candidates, makeContext, options });
-      }
-      const v1SweepWarnings = (v1SweepResult) => {
-        if (!v1SweepResult) return [];
-        const out = [...(v1SweepResult.warnings || [])];
-        if (v1SweepResult.removed > 0) {
-          out.push(`swept ${v1SweepResult.removed} legacy plugin-key entr${v1SweepResult.removed === 1 ? "y" : "ies"} (the detected opencode v2 host cannot load them)`);
-        }
-        if (v1SweepResult.error) {
-          out.push(`legacy plugin-key sweep failed: ${v1SweepResult.error.reason}`);
-        } else if (v1SweepResult.activeEntryRemaining) {
-          out.push("legacy plugin-key sweep retained a fail-closed entry; manual review required");
-        }
-        return out;
-      };
 
       // v2 `plugins` key runs after the v1 key write (which may have created
       // the default config file) and re-reads the candidates itself — the v1
       // apply may have mutated the same files moments ago inside this lock.
       // lockedV2Pre is therefore only a heuristic here: when the v1 apply
       // created the config, the pre-apply v2 scan saw no file at all, so the
-      // apply must also run whenever the v1 REGISTER key mutated
-      // (applyV2Register no-ops on an already-converged config). A v1-key
-      // sweep cannot create or restructure the config, so it never needs this.
+      // apply must also run whenever the v1 key mutated (applyV2Register
+      // no-ops on an already-converged config).
       let v2Apply = { status: "ok", added: false, created: false, mutatedPaths: [], warnings: [] };
-      const v1RegisterWroteConfig = lockedPre.mode === "register" && lockedPre.needsMutation;
-      if (v2Mode === "register" && (v1RegisterWroteConfig || lockedV2Pre.needsMutation)) {
+      if (v2Mode === "register" && (lockedPre.needsMutation || lockedV2Pre.needsMutation)) {
         // Re-read after the v1 write (it may have created/mutated the file).
         // The lock-held guard above already proved the key unambiguous, so a
         // throw here would mean a concurrent writer; surface it rather than
@@ -990,27 +944,27 @@ function makeFamilyInstaller(agentId) {
         ...recoveryWarnings,
         ...lockedWarnings,
         ...(apply.warnings || []),
-        ...((v1SweepApply && v1SweepApply.warnings) || []),
         ...(v2Apply.warnings || []),
         ...v2SweepWarnings(v2SweepApply),
-        ...v1SweepWarnings(v1SweepApply),
       ];
       const allMutatedPaths = [
         ...apply.mutatedPaths,
-        ...((v1SweepApply && v1SweepApply.mutatedPaths) || []),
         ...v2Apply.mutatedPaths,
         ...((v2SweepApply && v2SweepApply.mutatedPaths) || []),
       ];
       const effectivePath = allMutatedPaths.length
         ? allMutatedPaths[allMutatedPaths.length - 1]
         : (lockedPre.effective ? lockedPre.effective.path : configPath);
-      const registeredAnyKey = apply.added || v2Apply.added;
-      logRegister(options, effectivePath, canonicalEntry, apply.created || v2Apply.created, registeredAnyKey, false);
+      const added = apply.added || v2Apply.added;
+      // On a v2 host the entry opencode actually loads is the v2 sibling, so the
+      // "Registered:" line must name that path, not the swept v1 entry dir.
+      const registeredDir = (v2Mode === "register" && v2Apply.added) ? canonicalV2Entry : canonicalEntry;
+      logRegister(options, effectivePath, registeredDir, apply.created, added, false);
       return {
         status: "ok",
-        added: registeredAnyKey,
+        added,
         skipped: !lockedNeedsMutation && !ownerUpdated,
-        created: apply.created || v2Apply.created,
+        created: apply.created,
         configPath: effectivePath,
         pluginDir: canonicalEntry,
         ownerUpdated,

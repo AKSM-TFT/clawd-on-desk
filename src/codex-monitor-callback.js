@@ -4,6 +4,7 @@ const { normalizeQuotaGroup } = require("../hooks/quota-bucket");
 const { CODEX_QUOTA_FIELDS } = require("../hooks/codex-rate-limits");
 
 function isCodexMonitorMetadataOnlyEvent(event, extra) {
+  if (event === "session_index:title") return true;
   return event === "event_msg:token_count"
     && !!(extra && typeof extra === "object"
       && (extra.contextUsage || extra.codexQuota || extra.codexSparkQuota));
@@ -42,6 +43,7 @@ function buildCodexMonitorSessionOptions(extra, options = {}) {
   if (Object.prototype.hasOwnProperty.call(input, "transcriptPath")) out.transcriptPath = input.transcriptPath;
   if (Object.prototype.hasOwnProperty.call(input, "codexOriginator")) out.codexOriginator = input.codexOriginator;
   if (Object.prototype.hasOwnProperty.call(input, "codexSource")) out.codexSource = input.codexSource;
+  if (Object.prototype.hasOwnProperty.call(input, "turnId")) out.turnId = input.turnId;
   if (options.includeRecap === true) {
     const hasTrustedRecapTime = Number.isSafeInteger(input.recapOccurredAt) && input.recapOccurredAt >= 0;
     if (hasTrustedRecapTime) out.recapOccurredAt = input.recapOccurredAt;

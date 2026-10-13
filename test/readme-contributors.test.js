@@ -84,6 +84,13 @@ const VERIFIED_GITHUB_CONTRIBUTORS = [
   "mantertius",
   "VonSdite",
   "sunnyswag",
+  "hanzhe-one",
+  "52mzd",
+  "gzx19990101",
+  "ypjn",
+  "jin-codes",
+  "LetitiaChan",
+  "sanzanazaman",
 ];
 
 function loadSettingsContributors() {

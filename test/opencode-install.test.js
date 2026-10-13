@@ -291,18 +291,22 @@ describe("opencode installer CLI entry (node hooks/opencode-install.js)", () => 
     });
   }
 
-  it("registers the plugins key on a v2 host and unregisters with --uninstall", () => {
+  it("registers on default invocation and unregisters with --uninstall", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-opencode-cli-"));
     tempDirs.push(home);
     const configDir = path.join(home, ".config", "opencode");
     fs.mkdirSync(configDir, { recursive: true });
     const configPath = path.join(configDir, "opencode.json");
 
-    // Pin the verdict so CI machines without an opencode binary stay
-    // deterministic.
+    // The v2 verdict below needs to be pinned in the CLI child so CI machines
+    // without an opencode binary stay deterministic.
     const out = runCli([], home, { CLAWD_OPENCODE_HOST: "v2" });
     assert.match(out, /Registered: /);
-    const registered = readConfig(configPath).plugins;
+    const config = readConfig(configPath);
+    // opencode 2.x registers ONLY the `plugins` key; the legacy `plugin` key is
+    // left free of the v1 function entry opencode 2.x rejects.
+    assert.ok(!Object.hasOwn(config, "plugin") || config.plugin.length === 0, "v1 key is not registered on a v2 host");
+    const registered = config.plugins;
     assert.strictEqual(registered.length, 1);
     // #1026: packaged/source paths are no longer registered directly. The
     // entry must point at a user-writable content-addressed managed generation
@@ -313,53 +317,13 @@ describe("opencode installer CLI entry (node hooks/opencode-install.js)", () => 
     );
     assert.ok(/\/generations\/[0-9a-f]{64}\/opencode-plugin-v2$/.test(registered[0]), registered[0]);
     assert.ok(fs.existsSync(path.join(registered[0].replace(/\//g, path.sep))), "generation plugin dir must exist");
-    assert.strictEqual(readConfig(configPath).plugin, undefined,
-      "a v2 host never gets a legacy plugin key entry it cannot load");
 
     const out2 = runCli(["--uninstall"], home);
+    // On a v2 host only the v2 `plugins` entry exists; uninstall sweeps it.
     assert.match(out2, /entries removed: 1/);
-    assert.strictEqual(Object.hasOwn(readConfig(configPath), "plugins"), false);
-  });
-
-  it("registers the legacy plugin key on a v1 host and unregisters with --uninstall", () => {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-opencode-cli-"));
-    tempDirs.push(home);
-    const configDir = path.join(home, ".config", "opencode");
-    fs.mkdirSync(configDir, { recursive: true });
-    const configPath = path.join(configDir, "opencode.json");
-
-    const out = runCli([], home, { CLAWD_OPENCODE_HOST: "v1" });
-    assert.match(out, /Registered: /);
-    const registered = readConfig(configPath).plugin;
-    assert.strictEqual(registered.length, 1);
-    assert.ok(
-      registered[0].includes("/.clawd/integrations/opencode-family/opencode/homes/"),
-      `expected managed generation path, got ${registered[0]}`
-    );
-    assert.ok(/\/generations\/[0-9a-f]{64}\/opencode-plugin$/.test(registered[0]), registered[0]);
-    assert.ok(fs.existsSync(path.join(registered[0].replace(/\//g, path.sep))), "generation plugin dir must exist");
-    assert.strictEqual(readConfig(configPath).plugins, undefined,
-      "opencode <= 1.18.15 rejects the plugins key outright");
-
-    const out2 = runCli(["--uninstall"], home);
-    assert.match(out2, /entries removed: 1/);
-    assert.deepStrictEqual(readConfig(configPath).plugin, []);
-  });
-
-  it("a v2-host CLI register sweeps a legacy entry left by a 1.x host", () => {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), "clawd-opencode-cli-"));
-    tempDirs.push(home);
-    const configDir = path.join(home, ".config", "opencode");
-    fs.mkdirSync(configDir, { recursive: true });
-    const configPath = path.join(configDir, "opencode.json");
-
-    assert.match(runCli([], home, { CLAWD_OPENCODE_HOST: "v1" }), /Registered: /);
-    assert.strictEqual(readConfig(configPath).plugin.length, 1);
-
-    const out = runCli([], home, { CLAWD_OPENCODE_HOST: "v2" });
-    assert.match(out, /Registered: /);
-    assert.deepStrictEqual(readConfig(configPath).plugin, [], "the unloadable legacy entry is swept");
-    assert.strictEqual(readConfig(configPath).plugins.length, 1, "and the v2 entry takes over");
+    const after = readConfig(configPath);
+    assert.deepStrictEqual(after.plugins || [], []);
+    assert.ok(!Object.hasOwn(after, "plugin") || after.plugin.length === 0);
   });
 
   it("skips politely when opencode is not installed (exit 0, no config created)", () => {

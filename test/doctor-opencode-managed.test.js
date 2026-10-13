@@ -66,17 +66,6 @@ function writeJson(filePath, value) {
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf8");
 }
 
-// The installer never writes both keys any more, so a test that needs the
-// pre-fix dual-key state derives the legacy sibling path from the registered v2
-// entry instead of asking register to produce it.
-function seedLegacyEntryAlongsideV2(cfgPath) {
-  const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
-  const v2Entry = cfg.plugins.find((entry) => String(entry).includes("opencode-plugin-v2"));
-  cfg.plugin = [path.join(path.dirname(v2Entry), "opencode-plugin")];
-  writeJson(cfgPath, cfg);
-  return cfg.plugin[0];
-}
-
 describe("#1026 managed OpenCode Doctor", () => {
   it("reports a healthy canonical managed generation as ok", () => {
     const home = makeHome();
@@ -86,7 +75,7 @@ describe("#1026 managed OpenCode Doctor", () => {
     assert.strictEqual(detail.fixAction, undefined);
   });
 
-  it("issue #1039: a healthy install verifies the plugins key on a v2 host", () => {
+  it("issue #1039: a healthy install verifies both the plugin and plugins keys", () => {
     const home = makeHome();
     registerOpencodePlugin({ silent: true, v2Host: "v2", homeDir: home });
     const detail = runOne(managedDescriptor(home)).details[0];
@@ -95,44 +84,13 @@ describe("#1026 managed OpenCode Doctor", () => {
     assert.ok(/v2 plugins-key entry verified/.test(detail.detail), detail.detail);
   });
 
-  it("issue #1039: a v2-host leftover legacy entry is repairable, never ok", () => {
+  it("issue #1039: a leftover v1 entry without the v2 key is a repairable legacy-path, never ok", () => {
     const home = makeHome();
-    registerOpencodePlugin({ silent: true, v2Host: "v2", homeDir: home });
-    // The pre-fix state this machine hit: opencode 2.x cannot load a legacy
-    // entry once the `plugins` key exists, so it reports "Plugin failed".
-    seedLegacyEntryAlongsideV2(path.join(home, ".config", "opencode", "opencode.json"));
-
-    const detail = runOne(managedDescriptor(home)).details[0];
-    assert.strictEqual(detail.status, "broken-path");
-    assert.ok(detail.fixAction, "repairable via Fix");
-    assert.match(detail.detail, /cannot load/);
-
-    const repair = registerOpencodePlugin({ silent: true, v2Host: "v2", homeDir: home });
-    assert.strictEqual(repair.status, "ok", repair.message);
-    const cfg = JSON.parse(fs.readFileSync(path.join(home, ".config", "opencode", "opencode.json"), "utf8"));
-    assert.deepStrictEqual(cfg.plugin, [], "the unloadable legacy entry is swept");
-
-    const after = runOne(managedDescriptor(home)).details[0];
-    assert.strictEqual(after.status, "ok");
-    assert.strictEqual(after.fixAction, undefined);
-  });
-
-  it("issue #1039: a v2 host with no legacy key at all is ok", () => {
-    const home = makeHome();
-    registerOpencodePlugin({ silent: true, v2Host: "v2", homeDir: home });
-    const cfgPath = path.join(home, ".config", "opencode", "opencode.json");
-    const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
-    delete cfg.plugin;
-    writeJson(cfgPath, cfg);
-
-    const detail = runOne(managedDescriptor(home)).details[0];
-    assert.strictEqual(detail.status, "ok");
-    assert.strictEqual(detail.fixAction, undefined);
-  });
-
-  it("issue #1039: v1 entry without the v2 key is a repairable legacy-path, never ok", () => {
-    const home = makeHome();
-    registerOpencodePlugin({ silent: true, v2Host: "v1", homeDir: home });
+    // Simulate a pre-#1039 install: a v1 `plugin` entry with no `plugins` key.
+    // opencode 2.x rejects that function entry, so Repair must convert it.
+    writeJson(path.join(home, ".config", "opencode", "opencode.json"), {
+      plugin: [require("../hooks/opencode-install").resolveSourcePluginDir().replace(/\\/g, "/")],
+    });
 
     const detail = runOne(managedDescriptor(home)).details[0];
     assert.strictEqual(detail.status, "legacy-path");
@@ -182,7 +140,6 @@ describe("#1026 managed OpenCode Doctor", () => {
     const home = makeHome();
     registerOpencodePlugin({ silent: true, v2Host: "v2", homeDir: home });
     const cfgPath = path.join(home, ".config", "opencode", "opencode.json");
-    seedLegacyEntryAlongsideV2(cfgPath);
 
     // The host downgraded to 1.x while the v2 entry is still registered.
     const detail = runOne(managedDescriptor(home), "v1").details[0];
@@ -237,30 +194,22 @@ describe("#1026 managed OpenCode Doctor", () => {
     assert.strictEqual(detail.opencodeRemediation[0].remediation.index, 0);
   });
 
-  it("keeps the aggregate pass for a healthy canonical entry with a masked ambiguous lower entry", () => {
+  it("keeps the aggregate pass when a masked lower-priority file adds only foreign v1 entries", () => {
     const home = makeHome();
-    // A 1.x host is the shape where a healthy config declares the legacy key.
-    registerOpencodePlugin({ silent: true, v2Host: "v1", homeDir: home });
-    // Add a masked lower-priority modified copy in opencode.json (the .jsonc
-    // canonical declaration wins, so the effective view stays healthy).
-    const copy = path.join(home, "workaround2", "opencode-plugin");
-    fs.mkdirSync(copy, { recursive: true });
-    fs.writeFileSync(path.join(copy, "index.mjs"), "// modified clawd-like\n");
-    fs.mkdirSync(path.join(home, "workaround2", "opencode-family-plugin"), { recursive: true });
-    fs.writeFileSync(path.join(home, "workaround2", "opencode-family-plugin", "core.mjs"), "");
+    registerOpencodePlugin({ silent: true, v2Host: "v2", homeDir: home });
     const jsonPath = path.join(home, ".config", "opencode", "opencode.json");
     const jsoncPath = path.join(home, ".config", "opencode", "opencode.jsonc");
+    // Promote the registered config to the higher-priority .jsonc, then add a
+    // masked lower-priority .json that declares only a foreign npm plugin.
+    // Foreign entries must never turn the healthy v2 install into a failure.
     fs.writeFileSync(jsoncPath, fs.readFileSync(jsonPath, "utf8"));
     fs.rmSync(jsonPath);
-    writeJson(jsonPath, { plugin: [copy.replace(/\\/g, "/")] });
+    writeJson(jsonPath, { plugin: ["@vendor/keep"] });
 
-    const report = runOne(managedDescriptor(home), "v1");
+    const report = runOne(managedDescriptor(home));
     const detail = report.details[0];
     assert.strictEqual(detail.status, "ok");
-    assert.strictEqual(detail.level, "warning");
-    assert.ok(detail.supplementary, "expected supplementary masked warning");
-    assert.strictEqual(detail.supplementary.value, "masked-ambiguous");
-    // summarize() must not be changed by the supplementary warning.
+    assert.strictEqual(detail.fixAction, undefined);
     assert.strictEqual(report.status, "pass");
   });
 
@@ -426,7 +375,7 @@ describe("#1026 managed OpenCode Doctor", () => {
 
   it("reports a masked safe owned entry as repairable, not ok", () => {
     const home = makeHome();
-    registerOpencodePlugin({ silent: true, v2Host: "v1", homeDir: home });
+    registerOpencodePlugin({ silent: true, v2Host: "v2", homeDir: home });
     const jsonPath = path.join(home, ".config", "opencode", "opencode.json");
     const jsoncPath = path.join(home, ".config", "opencode", "opencode.jsonc");
     // Effective canonical lives in .jsonc; masked .json carries a legacy source.
@@ -434,7 +383,7 @@ describe("#1026 managed OpenCode Doctor", () => {
     fs.rmSync(jsonPath);
     writeJson(jsonPath, { plugin: [require("../hooks/opencode-install").resolvePluginDir().replace(/\\/g, "/")] });
 
-    const detail = runOne(managedDescriptor(home), "v1").details[0];
+    const detail = runOne(managedDescriptor(home)).details[0];
     assert.strictEqual(detail.status, "duplicate-entry");
     assert.deepStrictEqual(detail.fixAction, { type: "agent-integration", agentId: "opencode" });
   });
@@ -488,13 +437,17 @@ describe("#1026 managed OpenCode Doctor", () => {
     assert.ok(before.fixAction, "the legacy generation must be repairable");
 
     // 2. Repair (register under a v2 host) materializes a new five-file
-    //    generation, points the plugins key at it and sweeps the legacy one.
+    //    generation, registers ONLY the v2 plugins key, and sweeps the legacy
+    //    v1 entry (opencode 2.x rejects the v1 function entry).
     const repaired = registerOpencodePlugin({ silent: true, v2Host: "v2", homeDir: home });
     assert.strictEqual(repaired.status, "ok", repaired.message);
     const cfg = JSON.parse(fs.readFileSync(path.join(home, ".config", "opencode", "opencode.json"), "utf8"));
+    assert.ok(
+      !(cfg.plugin || []).some((entry) => String(entry).includes("opencode-plugin")),
+      "legacy v1 entry swept"
+    );
     const v2Entry = cfg.plugins.find((entry) => String(entry).includes("opencode-plugin-v2"));
-    assert.ok(v2Entry, "plugins key registered");
-    assert.deepStrictEqual(cfg.plugin, [], "the legacy entry the v2 host cannot load is swept");
+    assert.ok(v2Entry, "v2 plugins key registered");
     const migratedGenDir = path.dirname(String(v2Entry).replace(/\//g, path.sep));
     assert.notStrictEqual(path.resolve(migratedGenDir), path.resolve(legacy.genDir), "migrated to the five-file hash");
     for (const rel of ["index.mjs", "package.json"]) {

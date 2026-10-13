@@ -2,15 +2,15 @@
 // opencode v2 `plugins` config-key registration (issue #1039).
 //
 // OpenCode 2.x reads the renamed top-level `plugins` key and requires the
-// `{ id, setup }` plugin form, so on a v2 host this entry is the ONLY one
-// Clawd registers: the legacy `plugin` key is swept instead of written.
+// `{ id, setup }` plugin form, so the installer registers a v2 entry pointing
+// into the SAME managed generation as the v1 entry. On a detected v2 host the
+// legacy `plugin` key is SWEPT, not written: opencode 2.0.26 loads that key
+// through the same strict loader and surfaces Clawd's v1 function entry as
+// "Plugin failed: <path>" (probed on 2.0.15 it was only a load warning, hence
+// the earlier dual-key design). Verified host tolerances —
 // docs/investigations/opencode-v2-e1-evidence.md:
-//   - opencode 2.0.15 loaded `plugins` entries and merely logged a load
-//     warning for the legacy `plugin` key's v1 function entry.
-//   - opencode 2.0.27 does NOT: once the `plugins` key is present the host
-//     validates the legacy `plugin` entry against the v2 schema too, and the
-//     v1 function entry hard-fails ("Expected object at [\"default\"]"), which
-//     the TUI surfaces as "Plugin failed: <path>" on every start.
+//   - opencode 2.0.15+ loads `plugins` entries; since 2.0.26 it also hard-
+//     rejects the v1 function entry under the legacy `plugin` key.
 //   - opencode 1.18.32 silently DROPS an unknown `plugins` key (true for
 //     1.18.16+ only — see the version-bound note below); the v1 config keeps
 //     parsing and the v1 entry keeps loading.
@@ -21,10 +21,6 @@
 // shapes that must be preserved verbatim). Sharing the v1 planner would thread
 // tuple/legacy-literal machinery through a path that can never use it, so this
 // module reuses only the ownership classifier and the atomic write helpers.
-//
-// Because the caller may sweep the legacy key instead of writing it, this
-// module also owns CREATING the default config file on a clean install —
-// nothing else brings it into existence on a v2 host.
 //
 // Same hard invariants as #1026: complete plan validated before any write,
 // masked lower-priority files cleaned before the effective file, fail-closed
@@ -349,16 +345,6 @@ function appendV2Key(text, canonicalV2Entry) {
   return applyEdits(text, modify(text, [V2_PLUGIN_KEY], [canonicalV2Entry], formattingFor(text)));
 }
 
-// A clean install has a config directory but no file. On a v2 host this module
-// owns that creation: the caller sweeps the legacy `plugin` key instead of
-// writing it, so nothing else would bring the file into existence.
-function freshV2ConfigText(cfg, canonicalV2Entry) {
-  const settings = cfg.schema
-    ? { $schema: cfg.schema, [V2_PLUGIN_KEY]: [canonicalV2Entry] }
-    : { [V2_PLUGIN_KEY]: [canonicalV2Entry] };
-  return `${JSON.stringify(settings, null, 2)}\n`;
-}
-
 function appendV2Entry(text, canonicalV2Entry) {
   return applyEdits(text, modify(text, [V2_PLUGIN_KEY, -1], canonicalV2Entry, { ...formattingFor(text), isArrayInsertion: true }));
 }
@@ -395,7 +381,10 @@ function inspectV2Register({ cfg, configPath, candidates, makeContext, canonical
   }
 
   if (!effective) {
-    needsMutation = true;
+    // No config file exists at all. The v1 `plugin`-key register creates the
+    // default file; standalone callers get an explicit skip instead of this
+    // module fabricating a config it does not own.
+    warnings.push(`no opencode config file exists; the "${V2_PLUGIN_KEY}" key was not written`);
   }
   return { effective, warnings, needsReview, needsMutation };
 }
@@ -424,25 +413,13 @@ function applyV2Register({ cfg, configPath, candidates, makeContext, canonicalV2
 
   let effectiveEdit;
   if (!effective) {
-    try {
-      writeTextAtomic(configPath, freshV2ConfigText(cfg, canonicalV2Entry));
-    } catch (err) {
-      return {
-        status: "error",
-        reason: "config-write-failed",
-        message: err && err.message ? err.message : "failed to write opencode config",
-        mutatedPaths: [],
-        pendingPaths: [configPath],
-        warnings,
-      };
-    }
     return {
       status: "ok",
-      added: true,
-      created: true,
-      mutatedPaths: [configPath],
-      pendingPaths: [],
-      warnings,
+      added: false,
+      created: false,
+      skipped: true,
+      mutatedPaths: [],
+      warnings: [`no opencode config file exists; the "${V2_PLUGIN_KEY}" key was not written`],
     };
   }
   if (!isObjectRoot(effective.tree)) {
@@ -666,7 +643,6 @@ module.exports = {
     hasV2Array,
     appendV2Key,
     appendV2Entry,
-    freshV2ConfigText,
     removeV2EntriesFromText,
   },
 };

@@ -301,11 +301,6 @@ function inspectManagedOpencode(descriptor, options = {}) {
     }
   }
 
-  // On a v2 host the `plugins`-key entry IS the registration; the legacy
-  // `plugin` key is swept, so its absence is the converged state rather than
-  // a missing install.
-  const v2EntryIsRegistration = v2Host === "v2" && !!v2Assessment && v2Assessment.state === "ok";
-
   // A corrupt/foreign/mismatched owner record means the managed core would go
   // inert; report it without any automatic Fix.
   if (ownerRead.state === "foreign" || ownerRead.state === "mismatch" || ownerRead.state === "corrupt") {
@@ -386,62 +381,115 @@ function inspectManagedOpencode(descriptor, options = {}) {
     }
   }
 
-  // Masked lower-priority candidates: ambiguous entries there are retained and
-  // surfaced as a supplementary warning, but must not turn the effective
-  // healthy result into a failure. Computed before every early return, because a
-  // v2-only registration (no legacy array at all) is just as able to have
-  // masked debris below it.
-  const maskedWarnings = [];
-  const maskedOwned = [];
-  for (const state of existing) {
-    if (state === effective || !hasPluginArray(state)) continue;
-    const lower = entryOwnership.classifyPluginEntries(state.tree.plugin, makeContext());
-    for (const entry of lower.entries) {
-      if (FAIL_CLOSED.has(entry.category)) {
-        maskedWarnings.push(`${state.path}[${entry.index}] ${entry.category}: ${JSON.stringify(entry.rawEntry)}`);
-      } else if (SAFE_CATEGORIES.has(entry.category)) {
-        // A masked lower candidate still holds a proven-owned Clawd entry:
-        // cleanup is required, so the healthy effective view is not silently
-        // "ok" — Repair must converge it.
-        maskedOwned.push({ path: state.path, index: entry.index, category: entry.category, rawEntry: entry.rawEntry });
-      }
+  // Health on a detected opencode v2 host is judged from the `plugins` key: on
+  // v2 Clawd registers ONLY that key, and any legacy `plugin` entry is leftover
+  // (opencode 2.x runs the same strict loader on it, so a v1 function entry
+  // surfaces as "Plugin failed: <path>" / id `-`). Returns null when the config
+  // has no Clawd evidence at all, so the shared not-connected handling below
+  // still applies.
+  function inspectV2HostPrimary() {
+    // Any Clawd v1 `plugin` entry anywhere (effective or masked) is leftover on
+    // a v2 host: opencode 2.x rejects the function entry and Repair sweeps it.
+    const v1Entries = [];
+    for (const state of existing) {
+      if (!hasPluginArray(state)) continue;
+      v1Entries.push(...entryOwnership.classifyPluginEntries(state.tree.plugin, makeContext()).entries);
     }
-  }
-  const applyMaskedSupplementary = (result) => {
-    if (!maskedWarnings.length) return result;
-    result.level = "warning";
-    result.supplementary = {
-      key: "opencode_managed",
-      value: "masked-ambiguous",
-      entries: maskedWarnings,
+    const v1Blocking = v1Entries.filter((entry) => FAIL_CLOSED.has(entry.category));
+    const v1Owned = v1Entries.filter((entry) => SAFE_CATEGORIES.has(entry.category));
+    const v2Missing = !v2Assessment || v2Assessment.state === "missing";
+    if (!v1Blocking.length && !v1Owned.length && v2Missing) return null;
+    const baseFields = {
+      parentDirExists: true,
+      configFileExists: true,
+      configPath: effective.path,
+      opencodeEntries: v1Entries.map((entry) => entry.rawEntry),
+      v2Entries: v2Assessment ? v2Assessment.entries || [] : [],
     };
-    result.detail = `${result.detail}; masked lower-priority entries need review: ${maskedWarnings.join("; ")}`;
-    return result;
-  };
-  const maskedOwnedDetail = (headline) => (
-    `${headline}, but ${maskedOwned.length} masked lower-priority Clawd entr${maskedOwned.length === 1 ? "y" : "ies"} remain (${maskedOwned.map((entry) => `${entry.path}[${entry.index}]`).join(", ")}); Repair converges them`
-  );
+    if (v1Blocking.length) {
+      return makeResult(descriptor, "needs-review", {
+        level: "warning",
+        ...baseFields,
+        detail: `${effective.path} legacy "plugin" entry needs manual review: ${v1Blocking.map(describeEntry).join("; ")}`,
+        opencodeEntryIssue: v1Blocking[0].category,
+        opencodeRemediation: v1Blocking.map((entry) => ({
+          category: entry.category,
+          reason: entry.reason || null,
+          remediation: entryOwnership.describeRemediation(entry, effective.path),
+        })),
+      });
+    }
+    const leftover = v1Owned.length
+      ? `; ${v1Owned.length} leftover legacy v1 plugin entr${v1Owned.length === 1 ? "y" : "ies"} remain and Repair removes ${v1Owned.length === 1 ? "it" : "them"}`
+      : "";
+    if (v2Missing) {
+      return makeResult(descriptor, "legacy-path", {
+        level: "warning",
+        ...baseFields,
+        v2EntryState: "missing",
+        legacyEntries: v1Owned.map((entry) => entry.rawEntry),
+        detail: `${effective.path} opencode v2 entry is not registered${v2Assessment ? ` (${v2Assessment.detail})` : ""}; Repair registers it and removes the leftover v1 entry`,
+      });
+    }
+    if (v2Assessment.state === "needs-review") {
+      return makeResult(descriptor, "needs-review", {
+        level: "warning",
+        ...baseFields,
+        v2EntryState: "needs-review",
+        detail: `${effective.path} v2 entry needs manual review: ${v2Assessment.detail}`,
+      });
+    }
+    if (v2Assessment.state === "duplicate") {
+      return makeResult(descriptor, "duplicate-entry", {
+        level: "warning",
+        ...baseFields,
+        v2EntryState: "duplicate",
+        detail: `${effective.path} declares duplicate v2 plugins-key entries: ${v2Assessment.detail}`,
+      });
+    }
+    if (v2Assessment.state === "stale") {
+      return makeResult(descriptor, "broken-path", {
+        level: "warning",
+        ...baseFields,
+        v2EntryState: "stale",
+        detail: `${effective.path} v2 plugins-key entry can be safely migrated (${v2Assessment.detail})${leftover}`,
+      });
+    }
+    if (v1Owned.length) {
+      return makeResult(descriptor, "duplicate-entry", {
+        level: "warning",
+        ...baseFields,
+        v2EntryState: "ok",
+        legacyEntries: v1Owned.map((entry) => entry.rawEntry),
+        detail: `${effective.path} v2 plugins-key entry verified, but ${v1Owned.length} leftover legacy v1 plugin entr${v1Owned.length === 1 ? "y" : "ies"} remain (opencode 2.x rejects them); Repair removes ${v1Owned.length === 1 ? "it" : "them"}`,
+      });
+    }
+    return makeResult(descriptor, "ok", {
+      level: null,
+      ...baseFields,
+      v2EntryState: "ok",
+      detail: `${effective.path} v2 plugins-key entry verified`,
+    });
+  }
+
+  if (v2Host === "v2" && cfg.v2PluginDirName) {
+    const v2Primary = inspectV2HostPrimary();
+    if (v2Primary) return v2Primary;
+  }
 
   if (!hasPluginArray(effective)) {
-    if (v2EntryIsRegistration) {
-      if (maskedOwned.length) {
-        return makeResult(descriptor, "duplicate-entry", {
-          level: "warning",
-          parentDirExists: true,
-          configFileExists: true,
-          configPath: effective.path,
-          maskedEntries: maskedOwned,
-          detail: maskedOwnedDetail(`${effective.path} declares no legacy "plugin" array; ${v2Assessment.detail}`),
-        });
-      }
-      return applyMaskedSupplementary(makeResult(descriptor, "ok", {
-        level: null,
+    // A v1/unknown host with a leftover Clawd v2 entry is repairable (opencode
+    // <= 1.18.15 rejects the whole config), never a silent not-connected.
+    if (v2Host === "v1" && v2Assessment && v2Assessment.state === "ok") {
+      return makeResult(descriptor, "broken-path", {
+        level: "warning",
         parentDirExists: true,
         configFileExists: true,
         configPath: effective.path,
+        v2EntryState: "leftover",
         v2Entries: v2Assessment.entries || [],
-        detail: `${effective.path} declares no legacy "plugin" array; ${v2Assessment.detail}`,
-      }));
+        detail: `${effective.path} has no Clawd v1 plugin entry, but a Clawd v2 plugins-key entry remains and no opencode v2 host was detected (opencode <= 1.18.15 rejects the key); Repair removes it and registers the v1 entry`,
+      });
     }
     // No effective plugin array. If a valid canonical generation is lying
     // around unreferenced, warn without claiming correctness.
@@ -469,6 +517,26 @@ function inspectManagedOpencode(descriptor, options = {}) {
   const entries = classification.entries;
   const blocking = entries.filter((entry) => FAIL_CLOSED.has(entry.category));
 
+  // Masked lower-priority candidates: ambiguous entries there are retained and
+  // surfaced as a supplementary warning, but must not turn the effective
+  // healthy result into a failure.
+  const maskedWarnings = [];
+  const maskedOwned = [];
+  for (const state of existing) {
+    if (state === effective || !hasPluginArray(state)) continue;
+    const lower = entryOwnership.classifyPluginEntries(state.tree.plugin, makeContext());
+    for (const entry of lower.entries) {
+      if (FAIL_CLOSED.has(entry.category)) {
+        maskedWarnings.push(`${state.path}[${entry.index}] ${entry.category}: ${JSON.stringify(entry.rawEntry)}`);
+      } else if (SAFE_CATEGORIES.has(entry.category)) {
+        // A masked lower candidate still holds a proven-owned Clawd entry:
+        // cleanup is required, so the healthy effective view is not silently
+        // "ok" — Repair must converge it.
+        maskedOwned.push({ path: state.path, index: entry.index, category: entry.category, rawEntry: entry.rawEntry });
+      }
+    }
+  }
+
   if (blocking.length) {
     const details = blocking.map((entry) => ({
       category: entry.category,
@@ -490,26 +558,6 @@ function inspectManagedOpencode(descriptor, options = {}) {
   const owned = entries.filter((entry) => SAFE_CATEGORIES.has(entry.category));
 
   if (!owned.length) {
-    if (v2EntryIsRegistration) {
-      if (maskedOwned.length) {
-        return makeResult(descriptor, "duplicate-entry", {
-          level: "warning",
-          parentDirExists: true,
-          configFileExists: true,
-          configPath: effective.path,
-          maskedEntries: maskedOwned,
-          detail: maskedOwnedDetail(`${effective.path} registers Clawd only through the opencode v2 entry; ${v2Assessment.detail}`),
-        });
-      }
-      return applyMaskedSupplementary(makeResult(descriptor, "ok", {
-        level: null,
-        parentDirExists: true,
-        configFileExists: true,
-        configPath: effective.path,
-        v2Entries: v2Assessment.entries || [],
-        detail: `${effective.path} registers Clawd only through the opencode v2 entry; ${v2Assessment.detail}`,
-      }));
-    }
     return makeResult(descriptor, "not-connected", {
       level: "warning",
       parentDirExists: true,
@@ -576,7 +624,7 @@ function inspectManagedOpencode(descriptor, options = {}) {
         level: "warning",
         ...fields,
         ...v2Extras,
-        detail: maskedOwnedDetail(`${effective.path} is current`) + `${v2Suffix}`,
+        detail: `${effective.path} is current, but ${maskedOwned.length} masked lower-priority Clawd entr${maskedOwned.length === 1 ? "y" : "ies"} remain (${maskedOwned.map((entry) => `${entry.path}[${entry.index}]`).join(", ")}); Repair converges them${v2Suffix}`,
         maskedEntries: maskedOwned,
       });
     }
@@ -588,18 +636,6 @@ function inspectManagedOpencode(descriptor, options = {}) {
         ...fields,
         ...v2Extras,
         detail: `${effective.path} v1 plugin entry verified, but the opencode v2 entry is not registered (${v2Assessment.detail}); Repair adds it`,
-      });
-    }
-    // A leftover Clawd legacy entry on a 2.x host is actively harmful: opencode
-    // validates the `plugin` key against the v2 plugin schema as soon as the
-    // `plugins` key exists, and the v1 function entry fails to load ("Plugin
-    // failed"). Repair sweeps it.
-    if (v2EntryIsRegistration) {
-      return makeResult(descriptor, "broken-path", {
-        level: "warning",
-        ...fields,
-        v2Entries: v2Assessment.entries || [],
-        detail: `${effective.path} registers a legacy v1 plugin entry that the detected opencode v2 host cannot load; Repair removes it (${v2Assessment.detail})`,
       });
     }
     // A leftover Clawd v2 entry on a 1.x host is actively harmful (opencode
@@ -634,13 +670,23 @@ function inspectManagedOpencode(descriptor, options = {}) {
       : v2Assessment.state === "ok"
         ? `; ${v2Assessment.detail}`
         : `; no opencode v2 host detected, the "plugins" key is not required`;
-    return applyMaskedSupplementary(makeResult(descriptor, "ok", {
+    const result = makeResult(descriptor, "ok", {
       level: null,
       ...fields,
       v2Entries: v2Assessment ? v2Assessment.entries || [] : [],
       ...(v2Assessment && v2Assessment.state === "missing" ? { v2EntryState: "not-required" } : {}),
       detail: `${effective.path} plugin entry verified${v2OkDetail}`,
-    }));
+    });
+    if (maskedWarnings.length) {
+      result.level = "warning";
+      result.supplementary = {
+        key: "opencode_managed",
+        value: "masked-ambiguous",
+        entries: maskedWarnings,
+      };
+      result.detail = `${result.detail}; masked lower-priority entries need review: ${maskedWarnings.join("; ")}`;
+    }
+    return result;
   }
 
   // Safe but not current: exact legacy source, verified copy, owned stale

@@ -228,6 +228,33 @@ function createRuntimeHarness(overrides = {}) {
   };
 }
 
+test("mini animation cards include optional peek states only when the theme declares them", () => {
+  const base = createRuntimeHarness({ activeTheme: makeTheme("/tmp", {
+    miniMode: { supported: true, states: { "mini-idle": ["idle.svg"], "mini-peek": ["idle.svg"], "mini-sleep": ["sleep.svg"] } },
+  }) });
+  try {
+    const cards = base.runtime.buildAnimationOverrideSections().find((section) => section.id === "mini").cards;
+    assert.deepStrictEqual(cards.map((card) => card.stateKey), ["mini-idle", "mini-peek", "mini-sleep"]);
+  } finally {
+    base.cleanup();
+  }
+
+  const withOptional = createRuntimeHarness({ activeTheme: makeTheme("/tmp", {
+    miniMode: { supported: true, states: {
+      "mini-idle": ["idle.svg"], "mini-peek": ["idle.svg"],
+      "mini-peek-hold": ["idle.svg"], "mini-sleep": ["sleep.svg"],
+      "mini-sleep-peek": ["sleep.svg"],
+    } },
+  }) });
+  try {
+    const cards = withOptional.runtime.buildAnimationOverrideSections().find((section) => section.id === "mini").cards;
+    assert.deepStrictEqual(cards.map((card) => card.stateKey),
+      ["mini-idle", "mini-peek", "mini-peek-hold", "mini-sleep", "mini-sleep-peek"]);
+  } finally {
+    withOptional.cleanup();
+  }
+});
+
 test("animation override IPC registers owned channels, delegates, and disposes", async () => {
   const ipcMain = new FakeIpcMain();
   const calls = [];
@@ -588,6 +615,38 @@ test("animation override data builds tier cards with transition override metadat
   }
 });
 
+test("multi-file tier cards show and override the first file of the pool", () => {
+  const harness = createRuntimeHarness({
+    activeThemeFactory: (root) => makeTheme(root, {
+      _bindingBase: {
+        states: { idle: "idle.svg", thinking: "scripted.svg", sleeping: "sleep.svg" },
+        workingTiers: [{ minSessions: 2, originalFile: "idle.svg" }, { minSessions: 1, originalFile: "scripted.svg" }],
+        jugglingTiers: [],
+        displayHintMap: {},
+      },
+      workingTiers: [
+        { minSessions: 2, files: ["idle.svg", "sleep.svg"] },
+        { minSessions: 1, file: "scripted.svg" },
+      ],
+    }),
+  });
+  try {
+    const data = harness.runtime.buildAnimationOverrideData();
+    const poolCard = data.cards.find((card) => card.id === "workingTiers:idle.svg");
+    const singleCard = data.cards.find((card) => card.id === "workingTiers:scripted.svg");
+
+    assert.ok(poolCard);
+    assert.strictEqual(poolCard.originalFile, "idle.svg");
+    assert.strictEqual(poolCard.currentFile, "idle.svg");
+    assert.strictEqual(poolCard.bindingLabel, "workingTiers[idle.svg].files[0]");
+    assert.ok(singleCard);
+    assert.strictEqual(singleCard.currentFile, "scripted.svg");
+    assert.strictEqual(singleCard.bindingLabel, "workingTiers[scripted.svg]");
+  } finally {
+    harness.cleanup();
+  }
+});
+
 // #509: default idle visual picker payload
 test("animation override data exposes idle visual options and the current selection", () => {
   const harness = createRuntimeHarness({
@@ -614,6 +673,24 @@ test("animation override data exposes idle visual options and the current select
       { file: "idle-drift.svg", isThemeDefault: false, label: "Idle Drift" },
       { file: "idle-nap.svg", isThemeDefault: false, label: "Idle Nap" },
     ]);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("selectable-only idle art appears in the picker without an animation card", () => {
+  const harness = createRuntimeHarness({
+    snapshot: { themeOverrides: {}, idleVisual: { cloudling: "pool.apng" } },
+    activeThemeFactory: (root) => makeTheme(root, {
+      idleAnimations: [],
+      idleVisualOptions: [{ file: "pool.apng" }],
+    }),
+  });
+  try {
+    const data = harness.runtime.buildAnimationOverrideData();
+    assert.deepStrictEqual(data.idleDefaultVisual.options.map((option) => option.file), ["idle.svg", "pool.apng"]);
+    assert.strictEqual(data.idleDefaultVisual.selectedFile, "pool.apng");
+    assert.ok(!data.cards.some((card) => card.id === "idleAnimations:pool.apng"));
   } finally {
     harness.cleanup();
   }

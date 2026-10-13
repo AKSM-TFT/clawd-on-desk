@@ -47,6 +47,7 @@ const remoteSshStatusListeners = new Set();
 const remoteSshProgressListeners = new Set();
 const remoteApprovalStatusListeners = new Set();
 const textScaleContextListeners = new Set();
+const sizeContextListeners = new Set();
 const agentActivityListeners = new Set();
 const recapChangedListeners = new Set();
 const updateCheckStatusListeners = new Set();
@@ -89,6 +90,11 @@ ipcRenderer.on("remoteApproval:status-changed", (_event, payload) => {
 ipcRenderer.on("settings:text-scale-context-changed", () => {
   for (const cb of textScaleContextListeners) {
     try { cb(); } catch (err) { console.warn("text scale context listener threw:", err); }
+  }
+});
+ipcRenderer.on("settings:size-context-changed", () => {
+  for (const cb of sizeContextListeners) {
+    try { cb(); } catch (err) { console.warn("size context listener threw:", err); }
   }
 });
 ipcRenderer.on("settings:agent-activity", (_event, payload) => {
@@ -164,6 +170,12 @@ contextBridge.exposeInMainWorld("settingsAPI", {
   previewTextScale: (value) => ipcRenderer.invoke("settings:preview-text-scale", value),
   endTextScalePreview: () => ipcRenderer.invoke("settings:end-text-scale-preview"),
   getTextScaleContext: () => ipcRenderer.invoke("settings:get-text-scale-context"),
+  getSizeContext: () => ipcRenderer.invoke("settings:get-size-context"),
+  onSizeContextChanged: (cb) => {
+    if (typeof cb !== "function") return () => {};
+    sizeContextListeners.add(cb);
+    return () => sizeContextListeners.delete(cb);
+  },
   onTextScaleContextChanged: (cb) => {
     if (typeof cb !== "function") return () => {};
     textScaleContextListeners.add(cb);
@@ -174,12 +186,15 @@ contextBridge.exposeInMainWorld("settingsAPI", {
   enterShortcutRecording: (actionId) => ipcRenderer.invoke("settings:enterShortcutRecording", actionId),
   exitShortcutRecording: () => ipcRenderer.invoke("settings:exitShortcutRecording"),
   update: (key, value) => ipcRenderer.invoke("settings:update", { key, value }),
+  testQuotaNotification: () => ipcRenderer.invoke("settings:quota-test-notification"),
   getPreviewSoundUrl: () => ipcRenderer.invoke("settings:get-preview-sound-url"),
   command: (action, payload) => ipcRenderer.invoke("settings:command", { action, payload }),
   openDashboard: () => ipcRenderer.send("settings:open-dashboard"),
   listAgents: () => ipcRenderer.invoke("settings:list-agents"),
   pickAgentDiscoveryPath: (kind) => ipcRenderer.invoke("settings:pick-agent-discovery-path", { kind }),
   detectAgentInstallations: (opts) => ipcRenderer.invoke("settings:detect-agent-installations", opts),
+  getDshNotices: () => ipcRenderer.invoke("settings:dsh-notices"),
+  acknowledgeDshNotice: (profile, id) => ipcRenderer.invoke("settings:dsh-notice-ack", { profile, id }),
   getAboutInfo: () => ipcRenderer.invoke("settings:get-about-info"),
   checkForUpdates: () => ipcRenderer.invoke("settings:check-for-updates"),
   clearUpdateError: () => ipcRenderer.invoke("settings:clear-update-error"),
