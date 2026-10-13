@@ -75,7 +75,7 @@
   ],
   "reactions": {
     "drag": {
-      "file": "excited.png"
+      "file": "joyful_drag.apng"
     },
     "clickLeft": {
       "file": "celebrating.png",
@@ -161,6 +161,12 @@
       "y": 25,
       "w": 433,
       "h": 470
+    },
+    "joyful_drag.apng": {
+      "x": 48,
+      "y": 9,
+      "w": 417,
+      "h": 482
     }
   },
   "miniMode": {
