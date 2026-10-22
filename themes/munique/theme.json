@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "name": "Munique",
+  "version": "1.0.0",
+  "description": "Black-and-white cat desk mascot: pose-shift idle loop, yarn-ball thinking, dough-kneading coding loop.",
+  "viewBox": {
+    "x": 0,
+    "y": 0,
+    "width": 512,
+    "height": 512
+  },
+  "customization": {
+    "petTint": false
+  },
+  "layout": {
+    "contentBox": { "x": 0, "y": 20, "width": 512, "height": 478 },
+    "centerX": 256,
+    "baselineY": 498,
+    "visibleHeightRatio": 0.62,
+    "baselineBottomRatio": 0.035
+  },
+  "eyeTracking": {
+    "enabled": false,
+    "states": []
+  },
+  "states": {
+    "idle": ["idle.apng"],
+    "thinking": ["thinking.apng"],
+    "working": ["working.apng"],
+    "juggling": ["working.apng"],
+    "sleeping": { "fallbackTo": "idle" }
+  },
+  "sleepSequence": {
+    "mode": "direct"
+  },
+  "hitBoxes": {
+    "default": { "x": 19, "y": 17, "w": 476, "h": 471 }
+  },
+  "fileHitBoxes": {
+    "idle.apng": { "x": 41, "y": 17, "w": 430, "h": 471 },
+    "thinking.apng": { "x": 19, "y": 17, "w": 475, "h": 470 },
+    "working.apng": { "x": 21, "y": 38, "w": 471, "h": 449 }
+  },
+  "miniMode": {
+    "supported": false
+  },
+  "objectScale": {
+    "widthRatio": 1,
+    "heightRatio": 1,
+    "offsetX": 0,
+    "offsetY": 0
+  }
+}
