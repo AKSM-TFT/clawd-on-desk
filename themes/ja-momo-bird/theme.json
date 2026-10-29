@@ -1,0 +1,148 @@
+{
+  "schemaVersion": 1,
+  "name": "Ja-Momo Bird",
+  "author": "rullerzhou",
+  "version": "1.0.0",
+  "description": "Ja-Momo Bird desk mascot: animated glasses girl, laptop and glowing electronics box. Blinking idle loop, thinking poses, typing and coding loops, error, celebration and sleep states.",
+  "viewBox": {
+    "x": 0,
+    "y": 0,
+    "width": 640,
+    "height": 640
+  },
+  "customization": {
+    "petTint": false
+  },
+  "layout": {
+    "contentBox": {
+      "x": 30,
+      "y": 103,
+      "width": 580,
+      "height": 482
+    },
+    "centerX": 320,
+    "baselineY": 585,
+    "visibleHeightRatio": 0.92,
+    "baselineBottomRatio": 0.05
+  },
+  "eyeTracking": {
+    "enabled": false,
+    "states": []
+  },
+  "states": {
+    "idle": [
+      "ja-momo-bird-idle.webp"
+    ],
+    "thinking": [
+      "ja-momo-bird-thinking.webp"
+    ],
+    "working": [
+      "ja-momo-bird-typing.webp"
+    ],
+    "error": [
+      "ja-momo-bird-error.webp"
+    ],
+    "attention": [
+      "ja-momo-bird-success.webp"
+    ],
+    "notification": [
+      "ja-momo-bird-surprised.webp"
+    ],
+    "sleeping": [
+      "ja-momo-bird-sleep.webp"
+    ]
+  },
+  "sleepSequence": {
+    "mode": "direct"
+  },
+  "workingTiers": [
+    {
+      "minSessions": 3,
+      "file": "ja-momo-bird-coding.webp"
+    }
+  ],
+  "idleAnimations": [
+    {
+      "file": "ja-momo-bird-look-around.webp",
+      "duration": 4000
+    }
+  ],
+  "reactions": {
+    "drag": {
+      "file": "ja-momo-bird-drag_3.webp"
+    }
+  },
+  "hitBoxes": {
+    "default": {
+      "x": 30,
+      "y": 139,
+      "w": 580,
+      "h": 446
+    }
+  },
+  "fileHitBoxes": {
+    "ja-momo-bird-idle.webp": {
+      "x": 30,
+      "y": 139,
+      "w": 580,
+      "h": 446
+    },
+    "ja-momo-bird-thinking.webp": {
+      "x": 30,
+      "y": 115,
+      "w": 580,
+      "h": 470
+    },
+    "ja-momo-bird-typing.webp": {
+      "x": 30,
+      "y": 152,
+      "w": 580,
+      "h": 433
+    },
+    "ja-momo-bird-coding.webp": {
+      "x": 30,
+      "y": 190,
+      "w": 580,
+      "h": 395
+    },
+    "ja-momo-bird-error.webp": {
+      "x": 30,
+      "y": 103,
+      "w": 580,
+      "h": 482
+    },
+    "ja-momo-bird-success.webp": {
+      "x": 30,
+      "y": 114,
+      "w": 580,
+      "h": 471
+    },
+    "ja-momo-bird-surprised.webp": {
+      "x": 30,
+      "y": 120,
+      "w": 580,
+      "h": 465
+    },
+    "ja-momo-bird-sleep.webp": {
+      "x": 30,
+      "y": 148,
+      "w": 580,
+      "h": 437
+    },
+    "ja-momo-bird-look-around.webp": {
+      "x": 30,
+      "y": 123,
+      "w": 580,
+      "h": 462
+    },
+    "ja-momo-bird-drag_3.webp": {
+      "x": 30,
+      "y": 347,
+      "w": 580,
+      "h": 238
+    }
+  },
+  "miniMode": {
+    "supported": false
+  }
+}
